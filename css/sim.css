@@ -162,6 +162,17 @@ body.sim {
 .badge.ascent { color: var(--gold); border-color: var(--gold); }
 .badge.coast { color: var(--accent); border-color: var(--accent); }
 .badge.failed { color: var(--bad); border-color: var(--bad); }
+.badge.warn { color: var(--warn); border-color: var(--warn); }
+
+.plan-check { font-size: 12.5px; line-height: 1.45; padding: 8px 10px; border-radius: var(--radius-sm); border: 1px solid var(--line-2); color: var(--muted); }
+.plan-check:empty { display: none; }
+.plan-check.ok { border-color: rgba(107, 227, 155, 0.45); color: #bff3d3; }
+.plan-check.bad { border-color: rgba(255, 201, 77, 0.55); color: #ffe3a1; background: rgba(255, 201, 77, 0.06); }
+.plan-check button { margin-top: 6px; display: inline-block; }
+
+#btn-next.attention { border-color: var(--gold); color: var(--gold); animation: nudge 1.6s ease-in-out infinite; }
+@keyframes nudge { 50% { box-shadow: 0 0 0 4px rgba(255, 210, 77, 0.18); } }
+@media (prefers-reduced-motion: reduce) { #btn-next.attention { animation: none; } }
 
 .progress { margin-top: 10px; height: 6px; border-radius: 3px; background: var(--bg-2); overflow: hidden; }
 .progress span { display: block; height: 100%; background: linear-gradient(90deg, var(--orange), var(--gold)); transition: width 0.2s; }

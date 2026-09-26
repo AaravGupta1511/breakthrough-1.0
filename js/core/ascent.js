@@ -54,7 +54,10 @@ export function launchAzimuth(latDeg, incDeg) {
 export class Ascent {
   // planeNormal (optional, ECI unit vector) overrides `inclination` and fixes
   // the exact orbital plane, e.g. one that contains the Moon's direction.
-  constructor({ vehicle, payload, site, launchMs, targetAlt, inclination, planeNormal = null }) {
+  // stepSize: integration step in seconds; the mission planner uses a coarser
+  // step for quick what-if runs.
+  constructor({ vehicle, payload, site, launchMs, targetAlt, inclination, planeNormal = null, stepSize = STEP }) {
+    this.stepSize = stepSize;
     this.vehicle = vehicle;
     this.payload = payload;
     this.site = site;
@@ -171,7 +174,7 @@ export class Ascent {
     return t + 60;
   }
 
-  guidance(h, rx, ry, vx, vy, aThrust) {
+  guidance(h, rx, ry, vx, vy, aThrust, dt) {
     const r = Math.hypot(rx, ry);
     const radial = [rx / r, ry / r];
     const horiz = [-radial[1], radial[0]];
@@ -207,7 +210,7 @@ export class Ascent {
       }
     }
     // Rate-limit the attitude change.
-    const maxStep = 2 * DEG * STEP;
+    const maxStep = 2 * DEG * dt;
     this.pitch += Math.max(-maxStep, Math.min(maxStep, cmd - this.pitch));
     return [
       Math.cos(this.pitch) * horiz[0] + Math.sin(this.pitch) * radial[0],
@@ -250,7 +253,7 @@ export class Ascent {
       mdot = thrust / (this.ispAt(h) * G0);
     }
     const aT = thrust / this.mass;
-    const dir = this.guidance(h, this.x, this.y, this.vx, this.vy, aT);
+    const dir = this.guidance(h, this.x, this.y, this.vx, this.vy, aT, dt);
 
     // RK4 on position/velocity with thrust direction and mass frozen for the step.
     const s0 = [this.x, this.y, this.vx, this.vy];
@@ -335,6 +338,7 @@ export class Ascent {
   cutoff() {
     this.engineOn = false;
     this.status = 'inserted';
+    this.reachedTarget = true; // guidance cut the engine on target (not a fuel-out)
     const el = this.orbit2D();
     this.log('Engine cutoff', `Orbit ${el.periapsisAlt.toFixed(0)} × ${el.apoapsisAlt.toFixed(0)} km, i = ${this.inclination.toFixed(1)}°`);
   }
@@ -354,7 +358,7 @@ export class Ascent {
   // Advance to tSec after liftoff. Stops early if the ascent ends.
   advanceTo(tSec) {
     while (this.t < tSec - 1e-9 && (this.status === 'ascent' || this.status === 'ballistic')) {
-      this.step(Math.min(STEP, tSec - this.t));
+      this.step(Math.min(this.stepSize, tSec - this.t));
     }
   }
 

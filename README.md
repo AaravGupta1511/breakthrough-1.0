@@ -2,7 +2,7 @@
 
 **Breakthrough** is a browser-based space launch and orbit simulator. You can:
 
-- **Simulate launches** of six rockets (Falcon 9, LVM3, PSLV-XL, Soyuz-2.1b, Saturn V, Electron) from eight real launch sites. Thrust, drag, mass flow and staging are integrated step by step, with live telemetry: altitude, speed, g-load, dynamic pressure, stage and propellant.
+- **Simulate launches** of six rockets (Falcon 9, LVM3, PSLV-XL, Soyuz-2.1b, Saturn V, Electron) from eight real launch sites. Thrust, drag, mass flow and staging are integrated step by step, with live telemetry: altitude, speed, g-load, dynamic pressure, stage and propellant. Before launch, a flight-plan check runs the same model ahead of time. It tells you whether the rocket can reach the destination with your payload, and the heaviest payload it can carry there.
 - **Follow travel paths**: the flown trail, the predicted orbit, a ground track, and multi-burn missions:
   - circular LEO / ISS / sun-synchronous / polar orbits,
   - GTO → geostationary (Hohmann transfer plus plane change),

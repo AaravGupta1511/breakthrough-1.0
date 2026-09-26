@@ -5,6 +5,7 @@ import { AU, DEG, MU_EARTH, OMEGA_EARTH, R_EARTH, R_MOON } from './core/constant
 import { PLANETS, inEarthShadow, moonPositionEci, planetPositionEci, sunPositionEci } from './core/ephemeris.js';
 import { launchAzimuth } from './core/ascent.js';
 import { Mission, TARGETS, targetInclination } from './core/mission.js';
+import { assessMission, maxPayload } from './core/planner.js';
 import { stateToElements } from './core/orbits.js';
 import { Population, nearestObjects } from './core/population.js';
 import { eciToGeo, formatDuration, formatUtc, geoToEci } from './core/time.js';
@@ -249,14 +250,102 @@ function updatePlan() {
   $('plan-info').innerHTML = lines.join('<br>');
 }
 
-vehSel.onchange = () => { payloadIn.value = getVehicle().defaultPayload; updatePlan(); };
-tgtSel.onchange = () => { applyTargetDefaults(); updatePlan(); };
+// ------------------------------------------------------------ flight-plan check
+// Flies the ascent model ahead of time to tell whether the chosen rocket and
+// payload can actually reach the destination, and suggests a payload if not.
+
+const DESTINATION = { leo: 'orbit', iss: 'the ISS orbit', sso: 'sun-synchronous orbit', polar: 'polar orbit', geo: 'geostationary orbit', moon: 'the Moon' };
+const DEPARTURE_BURN = { geo: 'GTO injection', moon: 'trans-lunar injection' };
+let planTimer = null;
+let adjustPayload = false; // may lower the payload on the next check
+let payloadIsAuto = false; // the current payload was chosen by the app
+
+const readAltitude = () => Math.min(2000, Math.max(150, +altIn.value || TARGETS[tgtSel.value].alt));
+function planOptions(payload, vehicle = getVehicle()) {
+  const site = getSite(), targetId = tgtSel.value, altitude = readAltitude();
+  return {
+    vehicle, site, targetId, altitude, payload,
+    inclination: targetInclination(targetId, altitude, site, +incIn.value),
+    launchMs: state.simMs + 10000,
+  };
+}
+
+function schedulePlanCheck(adjust = false) {
+  adjustPayload = adjustPayload || adjust;
+  clearTimeout(planTimer);
+  planTimer = setTimeout(runPlanCheck, 120);
+}
+
+function runPlanCheck() {
+  const box = $('plan-check');
+  const v = getVehicle(), tid = tgtSel.value, dest = DESTINATION[tid];
+  const burn = DEPARTURE_BURN[tid];
+  let payload = Math.max(0, +payloadIn.value || 0);
+  let res = assessMission(planOptions(payload));
+  let note = '';
+  let max = null;
+  if (!res.feasible) {
+    max = maxPayload(planOptions(0));
+    if (adjustPayload && max > 0) {
+      const step = max > 2000 ? 100 : 10;
+      payload = Math.max(step, Math.floor((max * 0.95) / step) * step);
+      payloadIn.value = payload;
+      payloadIsAuto = true;
+      updatePlan();
+      res = assessMission(planOptions(payload));
+      note = `<br><span class="muted">Payload set to ${fmt(payload)} kg, about the most the ${escapeHtml(v.name)} can send to ${dest}.</span>`;
+    }
+  }
+  adjustPayload = false;
+
+  const km = (ms) => `${fmt(ms / 1000, 2)} km/s`;
+  let html;
+  if (res.feasible) {
+    html = burn
+      ? `✓ Reaches the parking orbit with ≈ ${km(res.dvLeft)} left in the upper stage; ${burn} needs ≈ ${km(res.dvNeeded)}.`
+      : `✓ Reaches ${dest} with ≈ ${km(res.dvLeft)} of propellant to spare.`;
+    box.className = 'plan-check ok';
+  } else if (max === 0) {
+    const others = VEHICLES.filter((o) => o !== v && assessMission(planOptions(0, o)).feasible).map((o) => o.name);
+    html = `✗ The ${escapeHtml(v.name)} can’t reach ${dest}, even with no payload.${others.length ? ` Try the ${others.map(escapeHtml).join(', ')}.` : ''}`;
+    box.className = 'plan-check bad';
+  } else {
+    const use = Math.max(10, Math.floor((max * 0.95) / (max > 2000 ? 100 : 10)) * (max > 2000 ? 100 : 10));
+    html = res.reachesOrbit
+      ? `✗ Only ≈ ${km(res.dvLeft)} left after reaching orbit, but ${burn} needs ≈ ${km(res.dvNeeded)}. The vehicle would be stranded in the parking orbit.`
+      : `✗ Too heavy: the ${escapeHtml(v.name)} can’t reach orbit with ${fmt(payload)} kg.`;
+    html += ` <button type="button" class="small" id="use-max">Use ${fmt(use)} kg</button>`;
+    box.className = 'plan-check bad';
+  }
+  box.innerHTML = html + note;
+  const btn = $('use-max');
+  if (btn) {
+    btn.disabled = !!state.mission;
+    btn.onclick = () => { payloadIn.value = btn.textContent.replace(/\D/g, ''); payloadIsAuto = false; updatePlan(); schedulePlanCheck(); };
+  }
+}
+
+vehSel.onchange = () => {
+  payloadIn.value = getVehicle().defaultPayload;
+  payloadIsAuto = false;
+  updatePlan();
+  schedulePlanCheck(true);
+};
+tgtSel.onchange = () => {
+  // A payload the app lowered for a far destination goes back to the rocket's default.
+  if (payloadIsAuto) { payloadIn.value = getVehicle().defaultPayload; payloadIsAuto = false; }
+  applyTargetDefaults();
+  updatePlan();
+  schedulePlanCheck(true);
+};
 siteSel.onchange = () => {
   const site = getSite();
   if (TARGETS[tgtSel.value].editableInc && +incIn.value < Math.abs(site.lat)) incIn.value = Math.abs(site.lat).toFixed(1);
   updatePlan();
+  schedulePlanCheck(payloadIsAuto);
 };
-[payloadIn, altIn, incIn].forEach((el) => el.addEventListener('input', updatePlan));
+payloadIn.addEventListener('input', () => { payloadIsAuto = false; updatePlan(); schedulePlanCheck(); });
+[altIn, incIn].forEach((el) => el.addEventListener('input', () => { updatePlan(); schedulePlanCheck(); }));
 
 // Defaults, overridable from the URL: ?vehicle=saturnv&site=ksc&target=moon&payload=45000
 const params = new URLSearchParams(location.search);
@@ -269,11 +358,12 @@ applyTargetDefaults();
 if (params.has('alt') && !altIn.disabled) altIn.value = params.get('alt');
 if (params.has('inc') && !incIn.disabled) incIn.value = params.get('inc');
 updatePlan();
+schedulePlanCheck(!params.has('payload')); // an explicit payload in the URL is kept as is
 
 $('mission-form').addEventListener('submit', (e) => {
   e.preventDefault();
   const site = getSite(), vehicle = getVehicle(), targetId = tgtSel.value;
-  const altitude = Math.min(2000, Math.max(150, +altIn.value || TARGETS[targetId].alt));
+  const altitude = readAltitude();
   const inclination = targetInclination(targetId, altitude, site, +incIn.value);
   state.mission = new Mission({
     vehicle, site, targetId, altitude, inclination,
@@ -310,6 +400,7 @@ function setFormLocked(locked) {
     siteSel.disabled = vehSel.disabled = tgtSel.disabled = payloadIn.disabled = false;
     applyTargetDefaults();
     updatePlan();
+    schedulePlanCheck();
   }
 }
 
@@ -466,6 +557,7 @@ function updateUi(force = false) {
   $('btn-play').setAttribute('aria-label', state.playing ? 'Pause' : 'Play');
   const next = m && m.nextEvent();
   $('btn-next').disabled = !next;
+  $('btn-next').classList.toggle('attention', !!next && m.phase === 'coast' && next.ms - state.simMs > 120e3);
   $('btn-next').title = next ? `Skip to: ${next.name}` : 'No upcoming mission event';
   $('view-follow').disabled = !trackedPosition();
 
@@ -493,9 +585,10 @@ function updateTelemetry(m, next) {
   }
   const met = formatDuration((state.simMs - m.launchMs) / 1000);
   const falling = m.phase === 'ascent' && m.ascent.status === 'ballistic';
-  const phaseName = falling ? 'Suborbital' : { countdown: 'Countdown', ascent: 'Powered ascent', coast: m.frame === 'moon' ? 'Lunar space' : 'Coasting', failed: 'Failed' }[m.phase];
+  const stranded = m.phase === 'coast' && m.incompleteMs != null;
+  const phaseName = falling ? 'Suborbital' : stranded ? 'Stranded' : { countdown: 'Countdown', ascent: 'Powered ascent', coast: m.frame === 'moon' ? 'Lunar space' : 'Coasting', failed: 'Failed' }[m.phase];
   badge.textContent = phaseName;
-  badge.className = `badge ${falling ? 'failed' : m.phase}`;
+  badge.className = `badge ${falling ? 'failed' : stranded ? 'warn' : m.phase}`;
   let r = [['Mission time', met]];
   if (m.phase === 'countdown') {
     r.push(['Vehicle', escapeHtml(m.vehicle.name)], ['Launch site', escapeHtml(m.site.name)]);
@@ -559,7 +652,12 @@ function updateEvents(m) {
     </li>`).join('');
   list.scrollTop = list.scrollHeight;
   const notable = fresh.filter((e) => e.name !== 'Ignition' && e.name !== 'Countdown');
-  if (notable.length) flash(notable[notable.length - 1].name);
+  if (notable.length) {
+    // After insertion, multi-burn missions coast for a while: point at the skip button.
+    const next = m.nextEvent();
+    const waiting = m.phase === 'coast' && next && next.ms - state.simMs > 120e3;
+    flash(waiting ? `${notable[notable.length - 1].name} · press Next event ⏭ to skip ahead` : notable[notable.length - 1].name, waiting ? 6000 : 2600);
+  }
 }
 
 function updateTracking() {

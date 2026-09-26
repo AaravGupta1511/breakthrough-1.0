@@ -7,6 +7,7 @@ import { AU, DEG, MU_EARTH } from '../js/core/constants.js';
 import { moonPositionEci, planetPositionHelio, PLANETS, sunPositionEci } from '../js/core/ephemeris.js';
 import { solveLambert } from '../js/core/lambert.js';
 import { Ascent } from '../js/core/ascent.js';
+import { assessMission, maxPayload } from '../js/core/planner.js';
 import { Mission, R_GEO } from '../js/core/mission.js';
 import { elementsToState, propagate, stateToElements, sunSyncInclination } from '../js/core/orbits.js';
 import { eciToGeo } from '../js/core/time.js';
@@ -124,4 +125,24 @@ test('Saturn V mission ends in a 100 km lunar orbit', () => {
   const tli = m.burns.find((b) => b.name === 'Trans-lunar injection');
   assert.ok(tli.dv > 3000 && tli.dv < 3300, `TLI Δv ${tli.dv}`);
   assert.ok(norm(m.positionEci()) > 300000, 'far from Earth');
+});
+
+test('a payload too heavy for the Moon is reported as incomplete, not complete', () => {
+  const v = vehicle('falcon9');
+  const m = flyMission({ vehicle: v, payload: 15000, site: site('ksc'), targetId: 'moon', altitude: 185, inclination: 28.6 }, 1);
+  const names = m.events.map((e) => e.name);
+  assert.ok(names.includes('Mission incomplete'), names.join(', '));
+  assert.ok(!names.includes('Mission complete'), 'must not claim success');
+  assert.equal(m.frame, 'earth');
+});
+
+test('the planner’s payload limit matches what the full mission can do', () => {
+  const v = vehicle('falcon9');
+  const opts = { vehicle: v, site: site('ksc'), targetId: 'geo', altitude: 200, inclination: 28.6, launchMs: T0 + 10000 };
+  const max = maxPayload(opts);
+  assert.ok(max > 6000 && max < 10000, `Falcon 9 GTO limit ${max} kg`);
+  assert.equal(assessMission({ ...opts, payload: 15000 }).feasible, false);
+  const m = flyMission({ vehicle: v, payload: Math.floor(max * 0.95), site: site('ksc'), targetId: 'geo', altitude: 200, inclination: 28.6 }, 1);
+  assert.ok(m.events.some((e) => e.name === 'Mission complete'), m.status);
+  assert.equal(maxPayload({ ...opts, vehicle: vehicle('electron') }), 0, 'Electron cannot reach GEO');
 });

@@ -54,15 +54,7 @@ export class Mission {
     this.groundTrack = []; // [lat, lon] while in the Earth frame
     this.lastTrailMs = null;
 
-    // Lunar missions launch into the plane that contains the Moon's expected
-    // arrival point, as Apollo did by picking the launch azimuth.
-    let planeNormal = null;
-    if (targetId === 'moon') {
-      const site0 = geoToEci(site.lat, site.lon, 1, this.launchMs);
-      const moonDir = moonPositionEci(this.launchMs + 4.1 * 86400e3);
-      planeNormal = unit(cross(site0, moonDir));
-      if (planeNormal[2] < 0) planeNormal = scale(planeNormal, -1);
-    }
+    const planeNormal = targetId === 'moon' ? lunarPlaneNormal(site, this.launchMs) : null;
     this.ascent = new Ascent({
       vehicle, payload, site, launchMs: this.launchMs,
       targetAlt: altitude, inclination, planeNormal,
@@ -203,6 +195,13 @@ export class Mission {
     this.log(ms, 'Mission complete', text, 'good');
   }
 
+  // The vehicle is safe in orbit but cannot continue to the destination.
+  incomplete(ms, text) {
+    this.status = text;
+    this.incompleteMs = ms;
+    this.log(ms, 'Mission incomplete', text, 'warn');
+  }
+
   burn(ms, name, dvVec, detail, performer) {
     const dv = norm(dvVec) * 1000;
     this.burns.push({ ms, name, dv, performer });
@@ -242,8 +241,7 @@ export class Mission {
       const need = norm(sub(vNew, s.v)) * 1000;
       const have = this.ascent.remainingDeltaV();
       if (need > have + 1) {
-        this.complete(ms, `Stayed in parking orbit: upper stage has ${have.toFixed(0)} m/s, GTO needs ${need.toFixed(0)} m/s.`);
-        this.events[this.events.length - 1].kind = 'warn';
+        this.incomplete(ms, `Not enough propellant for GTO injection: the upper stage has ${have.toFixed(0)} m/s left but needs ${need.toFixed(0)} m/s. Stranded in the parking orbit — try a lighter payload.`);
         return;
       }
       this.setArc(ms, s.r, vNew);
@@ -273,14 +271,13 @@ export class Mission {
         if (sol && (!best || sol.dvMag < best.dvMag)) best = { ...sol, ms, tof };
       }
     }
-    if (!best) { this.complete(fromMs, 'In parking orbit (no lunar transfer found).'); return; }
+    if (!best) { this.incomplete(fromMs, 'No lunar transfer found from this parking orbit.'); return; }
     this.log(fromMs, 'Parking orbit', `TLI planned: ${(best.dvMag * 1000).toFixed(0)} m/s, ${(best.tof / 86400).toFixed(1)}-day coast`);
     this.schedule(best.ms, 'Trans-lunar injection', (s, ms) => {
       const need = best.dvMag * 1000;
       const have = this.ascent.remainingDeltaV();
       if (need > have + 1) {
-        this.complete(ms, `Stayed in parking orbit: upper stage has ${have.toFixed(0)} m/s, TLI needs ${need.toFixed(0)} m/s.`);
-        this.events[this.events.length - 1].kind = 'warn';
+        this.incomplete(ms, `Not enough propellant for trans-lunar injection: the upper stage has ${have.toFixed(0)} m/s left but needs ${need.toFixed(0)} m/s. Stranded in the parking orbit — try a lighter payload.`);
         return;
       }
       this.setArc(ms, s.r, best.vDepart);
@@ -398,6 +395,15 @@ export class Mission {
 }
 
 // ------------------------------------------------------------ helpers
+
+// Lunar missions launch into the plane that contains the Moon's expected
+// arrival point, as Apollo did by picking the launch azimuth.
+export function lunarPlaneNormal(site, launchMs) {
+  const site0 = geoToEci(site.lat, site.lon, 1, launchMs);
+  const moonDir = moonPositionEci(launchMs + 4.1 * 86400e3);
+  const n = unit(cross(site0, moonDir));
+  return n[2] < 0 ? scale(n, -1) : n;
+}
 
 function samplePath(r, v, mu, bodyRadius) {
   const el = stateToElements(r, v, mu);
