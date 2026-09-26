@@ -399,6 +399,8 @@ export class Ascent {
   }
 
   // Delta-v the upper stage still has, for later burns (m/s).
+  // A lower stage that cannot restart (restartable: false) is dropped at
+  // cutoff with whatever propellant it still holds.
   remainingDeltaV(extraMassKg = 0) {
     const p = this.vehicle.phases[this.phase];
     if (!p || this.propLeft <= 0) return 0;
@@ -406,6 +408,10 @@ export class Ascent {
     const phases = this.vehicle.phases;
     for (let k = this.phase; k < phases.length; k++) {
       const prop = k === this.phase ? this.propLeft : phases[k].prop;
+      if (k === this.phase && p.restartable === false && k < phases.length - 1) {
+        m -= prop + p.dry;
+        continue;
+      }
       dv += phases[k].ispVac * G0 * Math.log(m / (m - prop));
       m -= prop + phases[k].dry;
     }

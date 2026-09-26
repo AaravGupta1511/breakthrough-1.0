@@ -36,6 +36,18 @@ body.sim {
 .views { display: flex; gap: 4px; overflow-x: auto; scrollbar-width: none; }
 .views button { white-space: nowrap; padding: 5px 11px; font-size: 14px; }
 .views button.active { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 600; }
+.view-select {
+  padding: 5px 8px;
+  font-size: 14px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line-2);
+  background: var(--bg-2);
+  color: var(--text);
+  cursor: pointer;
+  max-width: 170px;
+}
+.view-select.active { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 600; }
+.view-select option { background: var(--panel-solid); color: var(--text); font-weight: 400; }
 
 .search { position: relative; flex: 1 1 180px; max-width: 280px; }
 .search input {
@@ -169,6 +181,7 @@ body.sim {
 .plan-check.ok { border-color: rgba(107, 227, 155, 0.45); color: #bff3d3; }
 .plan-check.bad { border-color: rgba(255, 201, 77, 0.55); color: #ffe3a1; background: rgba(255, 201, 77, 0.06); }
 .plan-check button { margin-top: 6px; display: inline-block; }
+.plan-check .window { margin-bottom: 6px; padding-bottom: 6px; border-bottom: 1px dashed var(--line-2); color: var(--text); }
 
 #btn-next.attention { border-color: var(--gold); color: var(--gold); animation: nudge 1.6s ease-in-out infinite; }
 @keyframes nudge { 50% { box-shadow: 0 0 0 4px rgba(255, 210, 77, 0.18); } }
@@ -242,6 +255,7 @@ label.inline input { width: 64px; padding: 2px 6px; border-radius: 6px; border: 
 .label.site { color: var(--orange); font-size: 11px; background: rgba(4, 6, 12, 0.45); }
 .label.sel { border: 1px solid rgba(255, 255, 255, 0.5); }
 .label.craft { color: var(--gold); border: 1px solid rgba(255, 210, 77, 0.6); font-weight: 600; }
+.label.body.target { color: var(--accent); }
 
 .layers {
   position: absolute;

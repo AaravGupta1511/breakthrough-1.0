@@ -3,15 +3,19 @@
 
 import { MU_EARTH, R_EARTH } from './constants.js';
 import { Ascent } from './ascent.js';
-import { R_GEO, lunarPlaneNormal } from './mission.js';
+import { planeContaining } from './interplanetary.js';
+import { R_GEO, launchTimeFor, lunarPlaneNormal } from './mission.js';
+import { geoToEci } from './time.js';
 
 const MOON_DISTANCE = 384400; // km
 const TLI_MARGIN = 1.03;      // Lambert arcs cost a little more than an ideal Hohmann
 const PLAN_STEP = 0.25;       // s; within ~30 m/s of the full-resolution ascent
 
 // Delta-v (m/s) the upper stage must still deliver after reaching the
-// parking orbit: GTO injection for GEO, trans-lunar injection for the Moon.
-export function departureDeltaV(targetId, parkingAltKm) {
+// parking orbit: GTO injection for GEO, trans-lunar injection for the Moon,
+// or the escape burn of an interplanetary launch window.
+export function departureDeltaV(targetId, parkingAltKm, window = null) {
+  if (window) return window.dvDepart;
   const r = R_EARTH + parkingAltKm;
   const vCirc = Math.sqrt(MU_EARTH / r);
   const toApogee = (ra) => Math.sqrt(MU_EARTH * (2 / r - 2 / (r + ra))) - vCirc;
@@ -20,13 +24,18 @@ export function departureDeltaV(targetId, parkingAltKm) {
   return 0;
 }
 
-export function assessMission({ vehicle, payload, site, targetId, altitude, inclination, launchMs }) {
-  const planeNormal = targetId === 'moon' ? lunarPlaneNormal(site, launchMs) : null;
+// `window` (from findTransferWindow) is required for planets and their moons.
+export function assessMission({ vehicle, payload, site, targetId, altitude, inclination, launchMs, window = null }) {
+  let planeNormal = targetId === 'moon' ? lunarPlaneNormal(site, launchMs) : null;
+  if (window) {
+    launchMs = launchTimeFor(window, launchMs);
+    planeNormal = planeContaining(geoToEci(site.lat, site.lon, 1, launchMs), window.vInfDep);
+  }
   const a = new Ascent({ vehicle, payload, site, launchMs, targetAlt: altitude, inclination, planeNormal, stepSize: PLAN_STEP });
   a.advanceTo(3600);
   const reachesOrbit = a.reachedTarget === true;
   const dvLeft = reachesOrbit ? a.remainingDeltaV() : 0;
-  const dvNeeded = departureDeltaV(targetId, altitude);
+  const dvNeeded = departureDeltaV(targetId, altitude, window);
   return { reachesOrbit, dvLeft, dvNeeded, feasible: reachesOrbit && dvLeft >= dvNeeded };
 }
 

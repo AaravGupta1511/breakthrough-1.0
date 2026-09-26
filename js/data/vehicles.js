@@ -22,6 +22,40 @@ export const VEHICLES = [
     ],
   },
   {
+    id: 'falconheavy',
+    name: 'Falcon Heavy (expendable)',
+    operator: 'SpaceX · USA',
+    diameter: 3.66,
+    fairing: 1900,
+    payloadLEO: 63800,
+    defaultPayload: 25000,
+    upperStageCanRestart: true,
+    phases: [
+      // Side boosters at full thrust, centre core throttled to ~60 %.
+      { name: '2 side boosters + centre core (27 Merlins)', sep: 'Side booster separation', dry: 51200, prop: 1029000, thrustSL: 19778e3, thrustVac: 21390e3, ispSL: 282, ispVac: 311 },
+      { name: 'Centre core', sep: 'Centre core MECO & separation', dry: 28000, prop: 157700, thrustSL: 7607e3, thrustVac: 8227e3, ispSL: 282, ispVac: 311 },
+      { name: 'Stage 2 (Merlin Vacuum)', sep: 'SECO', dry: 4000, prop: 92670, thrustSL: 0, thrustVac: 981e3, ispSL: 0, ispVac: 348 },
+    ],
+  },
+  {
+    id: 'sls',
+    name: 'SLS Block 1',
+    operator: 'NASA · USA',
+    diameter: 8.4,
+    fairing: 6000,
+    payloadLEO: 95000,
+    defaultPayload: 27000,
+    upperStageCanRestart: true,
+    phases: [
+      // Two five-segment boosters burning alongside the core's RS-25s.
+      // Average (not peak) booster thrust, consistent with 1,515 t burned in ~126 s.
+      { name: '2 solid boosters + core (4× RS-25)', sep: 'Booster separation', dry: 198000, prop: 1515000, thrustSL: 34000e3, thrustVac: 37600e3, ispSL: 288, ispVac: 319 },
+      // RS-25s cannot restart: the core is dropped at cutoff and the ICPS does the departure burns.
+      { name: 'Core stage (4× RS-25)', sep: 'Core stage MECO & separation', dry: 85000, prop: 728000, thrustSL: 7440e3, thrustVac: 9116e3, ispSL: 366, ispVac: 452, restartable: false },
+      { name: 'ICPS (RL10)', sep: 'ICPS cutoff', dry: 3500, prop: 27200, thrustSL: 0, thrustVac: 110e3, ispSL: 0, ispVac: 465 },
+    ],
+  },
+  {
     id: 'lvm3',
     name: 'LVM3 (GSLV Mk III)',
     operator: 'ISRO · India',

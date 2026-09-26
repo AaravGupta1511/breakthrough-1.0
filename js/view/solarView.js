@@ -5,6 +5,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { AU } from '../core/constants.js';
 import { PLANETS, eciToEcliptic, planetOrbitPath, planetPositionHelio } from '../core/ephemeris.js';
+import { BODIES } from '../core/bodies.js';
 import { glowTexture } from './textures.js';
 
 const S = 100 / AU;
@@ -66,6 +67,42 @@ export class SolarView {
     this.craft = new THREE.Points(craftGeom, new THREE.PointsMaterial({ size: 16, sizeAttenuation: false, map: new THREE.CanvasTexture(glowTexture('rgba(255,236,150,1)', 'rgba(255,190,60,0)', 64, 0.25)), transparent: true, depthWrite: false, blending: THREE.AdditiveBlending }));
     this.craft.frustumCulled = false;
     this.ecl.add(this.craft);
+
+    // The spacecraft's heliocentric trail and predicted path.
+    const line = (color, dashed) => {
+      const g = new THREE.BufferGeometry();
+      g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(6000 * 3), 3));
+      g.setDrawRange(0, 0);
+      const m = dashed
+        ? new THREE.LineDashedMaterial({ color, dashSize: 2, gapSize: 1.4, transparent: true, opacity: 0.9 })
+        : new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.95 });
+      const l = new THREE.Line(g, m);
+      l.frustumCulled = false;
+      this.ecl.add(l);
+      return l;
+    };
+    this.trail = line(0xffd24d, false);
+    this.path = line(0x5ce1e6, true);
+  }
+
+  // Frame the camera on a region `radiusAU` across, looking down at an angle.
+  fit(radiusAU) {
+    const d = Math.max(2.2, radiusAU) * 100 * 2.3;
+    this.controls.target.set(0, 0, 0);
+    this.camera.position.set(0, d * 0.72, d * 0.7);
+  }
+
+  setLine(line, pointsEq) {
+    const attr = line.geometry.attributes.position;
+    const n = Math.min(pointsEq.length, attr.count);
+    const start = pointsEq.length - n;
+    for (let i = 0; i < n; i++) {
+      const p = eciToEcliptic(pointsEq[start + i]);
+      attr.array[i * 3] = p[0] * S; attr.array[i * 3 + 1] = p[1] * S; attr.array[i * 3 + 2] = p[2] * S;
+    }
+    attr.needsUpdate = true;
+    line.geometry.setDrawRange(0, n);
+    if (line.material.isLineDashedMaterial && n > 1) line.computeLineDistances();
   }
 
   update(ms, mission) {
@@ -84,12 +121,26 @@ export class SolarView {
     }
     const earth = this.planets.find((p) => p.planet.name === 'Earth').helio;
     this.craft.visible = !!mission;
+    this.trail.visible = this.path.visible = false;
+    this.target = mission?.destination ? (BODIES[mission.destination].parent === 'sun' ? mission.destination : BODIES[mission.destination].parent) : null;
     if (mission) {
-      const g = eciToEcliptic(mission.positionEci());
+      const g = eciToEcliptic(mission.positionHelio(ms));
       const a = this.craft.geometry.attributes.position;
-      a.array.set([(earth[0] + g[0]) * S, (earth[1] + g[1]) * S, (earth[2] + g[2]) * S]);
+      a.array.set([g[0] * S, g[1] * S, g[2] * S]);
       a.needsUpdate = true;
+      if (mission.trail.sun && mission.trail.sun.length > 1) {
+        this.trail.visible = true;
+        this.setLine(this.trail, mission.trail.sun);
+      }
+      const now = performance.now();
+      if (mission.frame === 'sun' && (!this.pathStamp || now - this.pathStamp > 500)) {
+        this.pathStamp = now;
+        const pred = mission.predictedPath();
+        if (pred) this.setLine(this.path, pred.points);
+      }
+      this.path.visible = mission.frame === 'sun';
     }
+    this.earthHelio = earth;
   }
 
   // Label anchors in world space.
@@ -98,7 +149,13 @@ export class SolarView {
     for (const it of this.planets) {
       const w = it.mesh.getWorldPosition(new THREE.Vector3());
       w.y += SIZE[it.planet.name] + 1.5;
-      out.push({ key: it.planet.name, text: it.planet.name, world: w, cls: 'body' });
+      const isTarget = this.target && BODIES[this.target].name === it.planet.name;
+      out.push({ key: it.planet.name, text: isTarget ? `${it.planet.name} · destination` : it.planet.name, world: w, cls: isTarget ? 'body target' : 'body' });
+    }
+    if (this.craft.visible) {
+      const a = this.craft.geometry.attributes.position.array;
+      const w = new THREE.Vector3(a[0], a[1], a[2]).applyMatrix4(this.ecl.matrixWorld);
+      out.push({ key: 'craft', text: 'Spacecraft', world: w, cls: 'craft' });
     }
     return out;
   }
