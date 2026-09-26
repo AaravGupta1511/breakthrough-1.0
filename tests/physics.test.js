@@ -8,7 +8,9 @@ import { moonPositionEci, planetPositionHelio, PLANETS, sunPositionEci } from '.
 import { solveLambert } from '../js/core/lambert.js';
 import { Ascent } from '../js/core/ascent.js';
 import { assessMission, maxPayload } from '../js/core/planner.js';
-import { Mission, R_GEO } from '../js/core/mission.js';
+import { Mission, R_GEO, TARGETS, launchTimeFor } from '../js/core/mission.js';
+import { BODIES, systemPlanet } from '../js/core/bodies.js';
+import { findTransferWindow } from '../js/core/interplanetary.js';
 import { elementsToState, propagate, stateToElements, sunSyncInclination } from '../js/core/orbits.js';
 import { eciToGeo } from '../js/core/time.js';
 import { dist, norm } from '../js/core/vec.js';
@@ -145,4 +147,70 @@ test('the planner’s payload limit matches what the full mission can do', () =>
   const m = flyMission({ vehicle: v, payload: Math.floor(max * 0.95), site: site('ksc'), targetId: 'geo', altitude: 200, inclination: 28.6 }, 1);
   assert.ok(m.events.some((e) => e.name === 'Mission complete'), m.status);
   assert.equal(maxPayload({ ...opts, vehicle: vehicle('electron') }), 0, 'Electron cannot reach GEO');
+});
+
+// ------------------------------------------------------------ interplanetary
+
+// Fly a mission by jumping from event to event (coasts are analytic).
+function flyToEnd(m, start) {
+  let t = start;
+  while (m.phase === 'countdown' || m.phase === 'ascent') { t += 1000; m.update(t); if (t - start > 4000e3) break; }
+  for (let k = 0; k < 40; k++) {
+    const ev = m.nextEvent();
+    if (!ev) break;
+    t = Math.max(t, ev.ms + 1);
+    m.update(t);
+  }
+  m.update(t + 86400e3);
+  return m;
+}
+
+function flyInterplanetary(vehicleId, targetId, payload, from = T0) {
+  const dest = TARGETS[targetId].body;
+  const window = findTransferWindow(systemPlanet(dest), from, 200, dest);
+  const start = launchTimeFor(window, from) - 10000;
+  const m = new Mission({ vehicle: vehicle(vehicleId), payload, site: site('ksc'), targetId, altitude: 200, inclination: 28.6, startMs: start, window });
+  return flyToEnd(m, start);
+}
+
+test('the launch-window search reproduces the 2020 Mars window (Perseverance)', () => {
+  const w = findTransferWindow('mars', Date.UTC(2020, 4, 1));
+  const days = (a, b) => Math.abs(a - b) / 86400e3;
+  assert.ok(days(w.departMs, Date.UTC(2020, 6, 30)) < 10, `departure ${new Date(w.departMs).toISOString()}`);
+  assert.ok(days(w.arriveMs, Date.UTC(2021, 1, 18)) < 10, `arrival ${new Date(w.arriveMs).toISOString()}`);
+  assert.ok(w.c3 > 11 && w.c3 < 17, `C3 ${w.c3}`);
+});
+
+test('Falcon Heavy puts a spacecraft into Mars orbit', () => {
+  const m = flyInterplanetary('falconheavy', 'mars', 10000);
+  assert.equal(m.frame, 'mars', m.status);
+  assert.ok(m.events.some((e) => e.name === 'Mission complete'), m.status);
+  const el = m.elements();
+  close(el.periAlt, 400, 5, 'periapsis');
+  const moi = m.burns.find((b) => b.name === 'Mars orbit insertion');
+  assert.ok(moi.dv > 600 && moi.dv < 1300, `Mars orbit insertion ${moi.dv} m/s`);
+});
+
+test('SLS reaches a 100 km orbit around Europa', () => {
+  const m = flyInterplanetary('sls', 'europa', 2000);
+  assert.equal(m.frame, 'europa', m.status);
+  const el = m.elements();
+  close(el.periAlt, 100, 1, 'periapsis');
+  close(el.apoAlt, 100, 1, 'apoapsis');
+});
+
+test('a Phobos mission ends holding station (Phobos is too small to orbit)', () => {
+  const m = flyInterplanetary('falconheavy', 'phobos', 5000);
+  assert.equal(m.frame, 'phobos', m.status);
+  assert.ok(m.arc.hold, 'holding station');
+  close(norm(m.r) - BODIES.phobos.radius, 20, 0.01, 'height above Phobos');
+});
+
+test('planner limits for the outer planets are plausible', () => {
+  const now = T0;
+  const jw = findTransferWindow('jupiter', now);
+  const opts = { site: site('ksc'), targetId: 'jupiter', altitude: 200, inclination: 28.6, launchMs: now + 10000, window: jw };
+  assert.equal(maxPayload({ ...opts, vehicle: vehicle('electron') }), 0, 'Electron cannot reach Jupiter');
+  const sls = maxPayload({ ...opts, vehicle: vehicle('sls') });
+  assert.ok(sls > 3000 && sls < 9000, `SLS to Jupiter ${sls} kg`);
 });

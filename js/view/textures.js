@@ -146,3 +146,121 @@ export function mapTexture(w, h) {
   }
   return c;
 }
+
+// ------------------------------------------------------------ planets & moons
+
+function noise1(r, n) {
+  // Smooth 1D random profile made of a few sine waves.
+  const waves = Array.from({ length: n }, () => [1 + r() * 12, r() * Math.PI * 2, 0.3 + r()]);
+  return (x) => waves.reduce((s, [f, p, a]) => s + a * Math.sin(x * f + p), 0) / n;
+}
+
+// Gas giants: latitude bands with wavy edges and a few storms.
+function banded(w, h, palette, seed, storms = []) {
+  const c = canvas(w, h);
+  const ctx = c.getContext('2d');
+  const r = rng(seed);
+  const wobble = noise1(r, 5);
+  const shade = noise1(r, 7);
+  for (let y = 0; y < h; y++) {
+    const lat = y / h;
+    for (let x = 0; x < w; x += 4) {
+      const t = lat + 0.012 * wobble((x / w) * Math.PI * 2 + lat * 20);
+      const k = Math.min(palette.length - 1, Math.max(0, Math.floor((0.5 + 0.5 * Math.sin(t * palette.length * 3.1 + shade(t * 9) * 2)) * palette.length)));
+      ctx.fillStyle = palette[k];
+      ctx.fillRect(x, y, 4, 1);
+    }
+  }
+  for (const [x, y, rx, ry, col] of storms) {
+    ctx.fillStyle = col;
+    ctx.beginPath(); ctx.ellipse(x * w, y * h, rx * w, ry * h, 0, 0, Math.PI * 2); ctx.fill();
+  }
+  // Soft blur-like overlay to blend the bands.
+  ctx.globalAlpha = 0.35;
+  ctx.drawImage(c, 0, 2, w, h - 4);
+  ctx.globalAlpha = 1;
+  return c;
+}
+
+// Rocky or icy bodies: base colour, blotches and craters.
+function rocky(w, h, { base, dark, light, seed, blotches = 30, craters = 300, streaks = 0, streakColor = 'rgba(120,70,40,0.5)' }) {
+  const c = canvas(w, h);
+  const ctx = c.getContext('2d');
+  const r = rng(seed);
+  ctx.fillStyle = base;
+  ctx.fillRect(0, 0, w, h);
+  for (let k = 0; k < blotches; k++) {
+    const x = w * r(), y = h * (0.1 + 0.8 * r()), rad = w * (0.02 + 0.07 * r());
+    const g = ctx.createRadialGradient(x, y, 0, x, y, rad);
+    const col = r() < 0.5 ? dark : light;
+    g.addColorStop(0, col); g.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.ellipse(x, y, rad * 1.5, rad, r() * 3, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.strokeStyle = streakColor;
+  for (let k = 0; k < streaks; k++) {
+    ctx.lineWidth = 0.6 + r() * 1.4;
+    ctx.beginPath();
+    let x = w * r(), y = h * (0.15 + 0.7 * r());
+    ctx.moveTo(x, y);
+    for (let s = 0; s < 6; s++) { x += (r() - 0.5) * w * 0.15; y += (r() - 0.5) * h * 0.1; ctx.lineTo(x, y); }
+    ctx.stroke();
+  }
+  for (let k = 0; k < craters; k++) {
+    const x = w * r(), y = h * (0.05 + 0.9 * r());
+    const rad = Math.max(0.8, w * 0.01 * Math.pow(r(), 3));
+    ctx.fillStyle = 'rgba(0,0,0,0.25)';
+    ctx.beginPath(); ctx.arc(x, y, rad, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,0.2)';
+    ctx.lineWidth = Math.max(0.5, rad * 0.3);
+    ctx.beginPath(); ctx.arc(x, y, rad, Math.PI, Math.PI * 1.8); ctx.stroke();
+  }
+  return c;
+}
+
+export function bodyTexture(id) {
+  const W = 512, H = 256;
+  switch (id) {
+    case 'mercury': return rocky(W, H, { base: '#8f8a84', dark: 'rgba(60,58,55,0.5)', light: 'rgba(200,195,185,0.4)', seed: 11, craters: 700 });
+    case 'venus': return banded(W, H, ['#e8d4a2', '#dcc38c', '#efdcb0', '#d6b77c'], 12);
+    case 'mars': {
+      const c = rocky(W, H, { base: '#b5532c', dark: 'rgba(70,30,20,0.55)', light: 'rgba(220,140,90,0.4)', seed: 13, blotches: 45, craters: 250 });
+      const ctx = c.getContext('2d');
+      ctx.fillStyle = 'rgba(245,245,250,0.9)';
+      ctx.fillRect(0, 0, W, H * 0.05); ctx.fillRect(0, H * 0.96, W, H * 0.04); // polar caps
+      return c;
+    }
+    case 'jupiter': return banded(W, H, ['#e9dcc4', '#c89b6b', '#f3eadb', '#b07a4f', '#dcc3a0', '#8f6444'], 14, [[0.62, 0.64, 0.035, 0.028, '#c2593c']]);
+    case 'saturn': return banded(W, H, ['#eadbb0', '#d9c38f', '#f1e5c4', '#cdb27a'], 15);
+    case 'uranus': return banded(W, H, ['#a8e0e6', '#9fd6de', '#b3e6ea'], 16);
+    case 'neptune': return banded(W, H, ['#4b72d9', '#5a82e4', '#3f63c4', '#6d91ea'], 17, [[0.4, 0.62, 0.03, 0.02, '#2a3f8f']]);
+    case 'phobos': return rocky(256, 128, { base: '#6e6258', dark: 'rgba(40,34,30,0.5)', light: 'rgba(150,135,120,0.4)', seed: 21, craters: 160 });
+    case 'deimos': return rocky(256, 128, { base: '#8c7d6f', dark: 'rgba(60,52,45,0.4)', light: 'rgba(170,155,140,0.4)', seed: 22, craters: 90 });
+    case 'io': return rocky(256, 128, { base: '#e2c84a', dark: 'rgba(150,80,30,0.6)', light: 'rgba(250,245,200,0.5)', seed: 23, blotches: 60, craters: 30 });
+    case 'europa': return rocky(256, 128, { base: '#e4d9c6', dark: 'rgba(160,120,90,0.35)', light: 'rgba(255,255,255,0.4)', seed: 24, craters: 10, streaks: 40, streakColor: 'rgba(140,80,50,0.55)' });
+    case 'ganymede': return rocky(256, 128, { base: '#9b917f', dark: 'rgba(70,62,52,0.55)', light: 'rgba(200,195,185,0.45)', seed: 25, blotches: 40, craters: 120 });
+    case 'callisto': return rocky(256, 128, { base: '#5e5448', dark: 'rgba(40,35,30,0.5)', light: 'rgba(210,205,195,0.6)', seed: 26, craters: 400 });
+    case 'titan': return banded(256, 128, ['#d9a14a', '#cf9540', '#e2ad5a'], 27);
+    case 'enceladus': return rocky(256, 128, { base: '#f2f5f8', dark: 'rgba(170,190,210,0.35)', light: 'rgba(255,255,255,0.6)', seed: 28, craters: 60, streaks: 12, streakColor: 'rgba(120,160,200,0.5)' });
+    case 'titania': return rocky(256, 128, { base: '#a39d97', dark: 'rgba(80,75,70,0.45)', light: 'rgba(210,205,200,0.4)', seed: 29, craters: 200 });
+    case 'triton': return rocky(256, 128, { base: '#dcc8bf', dark: 'rgba(150,120,110,0.45)', light: 'rgba(245,235,230,0.5)', seed: 30, blotches: 50, craters: 40 });
+    default: return rocky(256, 128, { base: '#999', dark: 'rgba(0,0,0,0.3)', light: 'rgba(255,255,255,0.3)', seed: 31 });
+  }
+}
+
+// Saturn's rings, drawn as concentric bands for a RingGeometry's planar UVs.
+export function ringTexture(size, inner, outer) {
+  const c = canvas(size, size);
+  const ctx = c.getContext('2d');
+  const r = rng(99);
+  const cx = size / 2;
+  for (let k = 0; k < 220; k++) {
+    const f = inner / outer + (1 - inner / outer) * (k / 220);
+    const cassini = f > 0.82 && f < 0.86; // the Cassini division
+    const a = cassini ? 0.05 : 0.35 + 0.5 * r();
+    ctx.strokeStyle = `rgba(${220 - 30 * r()}, ${200 - 30 * r()}, ${160 - 30 * r()}, ${a})`;
+    ctx.lineWidth = (size / 2) * (1 - inner / outer) / 220 + 0.5;
+    ctx.beginPath(); ctx.arc(cx, cx, f * (size / 2), 0, Math.PI * 2); ctx.stroke();
+  }
+  return c;
+}

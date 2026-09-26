@@ -30,17 +30,17 @@
       <div class="hero-copy">
         <p class="eyebrow">Space launch &amp; orbit simulator</p>
         <h1>Launch rockets. Trace orbits. Dodge the debris.</h1>
-        <p class="lede">Fly real rockets from real launch sites, watch the ascent stage by stage, then follow your spacecraft to orbit, to geostationary altitude or all the way to the Moon, surrounded by the satellites and debris that share the sky.</p>
+        <p class="lede">Fly real rockets from real launch sites, watch the ascent stage by stage, then follow your spacecraft to orbit, to the Moon, to the planets or to their moons, from the crowded sky around Earth all the way out to Neptune.</p>
         <div class="cta">
           <a class="button primary big" href="simulator.html">🚀 Open the simulator</a>
           <a class="button ghost big" href="#how">How it works</a>
         </div>
         <ul class="stats">
-          <li><b>6</b> rockets</li>
+          <li><b>8</b> rockets</li>
           <li><b>8</b> launch sites</li>
+          <li><b>7</b> planets &amp; <b>11</b> moons to visit</li>
           <li><b>1,100+</b> satellites</li>
           <li><b>20,000</b> debris objects max</li>
-          <li><b>8</b> planets + Moon</li>
         </ul>
       </div>
     </section>
@@ -56,7 +56,7 @@
         <article class="card">
           <div class="icon">🛰️</div>
           <h3>Follow travel paths</h3>
-          <p>See the flown trail and the predicted orbit, then fly Hohmann transfers to GEO and Lambert-targeted trans-lunar injections with patched-conic arrival at the Moon.</p>
+          <p>See the flown trail and the predicted orbit. Fly transfers to GEO and the Moon, or wait for a launch window and cruise to Mars, Jupiter or Neptune, then capture into orbit or head on to Europa, Titan or Phobos.</p>
         </article>
         <article class="card">
           <div class="icon">🌍</div>
@@ -90,6 +90,18 @@
         <a class="mission" href="simulator.html?vehicle=soyuz&amp;site=baikonur&amp;target=iss&amp;payload=7100">
           <b>Crew to the ISS orbit</b><span>Soyuz-2.1b · Baikonur · 51.6°</span>
         </a>
+        <a class="mission" href="simulator.html?vehicle=falconheavy&amp;site=ksc&amp;target=mars">
+          <b>Mars orbiter</b><span>Falcon Heavy · Kennedy · next Mars launch window</span>
+        </a>
+        <a class="mission" href="simulator.html?vehicle=sls&amp;site=ksc&amp;target=europa">
+          <b>Europa orbiter</b><span>SLS Block 1 · 3-year cruise to Jupiter, then Europa</span>
+        </a>
+        <a class="mission" href="simulator.html?vehicle=falconheavy&amp;site=ksc&amp;target=phobos">
+          <b>Phobos rendezvous</b><span>Falcon Heavy · a moon too small to orbit</span>
+        </a>
+        <a class="mission" href="simulator.html?vehicle=saturnv&amp;site=ksc&amp;target=titan">
+          <b>Titan orbiter</b><span>Saturn V · 6.6-year cruise to Saturn’s largest moon</span>
+        </a>
         <a class="mission warn" href="simulator.html?vehicle=electron&amp;site=mahia&amp;target=leo&amp;payload=900">
           <b>Too heavy!</b><span>Electron with 3× its rated payload</span>
         </a>
@@ -108,6 +120,10 @@
           <p>Once the engines stop, the spacecraft follows an exact two-body conic (universal-variable Kepler propagation), so time warp never adds error. Manoeuvres are impulsive burns: circularisation at apogee, GTO injection at an equator crossing, a Lambert-solved trans-lunar injection, and capture into lunar orbit after entering the Moon’s sphere of influence.</p>
         </li>
         <li>
+          <h3>To the planets</h3>
+          <p>A launch-window search solves Lambert’s problem around the Sun over the next synodic period to find the cheapest departure date. It picks Perseverance’s real July 2020 window when run for 2020. The rocket launches into a parking orbit aimed along the escape direction and burns onto a hyperbola. On leaving Earth’s sphere of influence the spacecraft switches to orbiting the Sun (patched conics) and makes a trajectory correction. At the planet it trims its approach and brakes into orbit. For moons, a second Lambert search plans the transfer from the capture orbit.</p>
+        </li>
+        <li>
           <h3>The neighbourhood</h3>
           <p>Satellites and debris move on Keplerian orbits with J2 nodal drift, which is why sun-synchronous orbits really stay aligned with the Sun. The Sun, Moon and planets come from standard low-precision ephemerides, which drive the lighting, the day/night terminator, eclipses and every distance read-out.</p>
         </li>
@@ -120,6 +136,7 @@
         <p><b>Educational, not operational.</b> Rocket figures are approximations of published values, and the ascent uses simplified aerodynamics and guidance. Burns after orbit insertion are instantaneous.</p>
         <p><b>Satellites</b> use representative orbits: correct altitudes, inclinations and shapes, and real longitudes for geostationary spacecraft, but not live tracking data, so positions along each orbit are illustrative.</p>
         <p><b>Debris</b> is generated to match the real population’s altitude and inclination structure. The count is adjustable; tens of thousands of objects are tracked in reality.</p>
+        <p><b>Moons of other planets</b> move on circular orbits in their planet’s equatorial plane with the right sizes and periods; where they are along those orbits is representative. Missions fly direct transfers without gravity assists, so some burns are larger than real missions need.</p>
         <p><b>Ephemerides</b> for the Sun, Moon and planets are accurate to a fraction of a degree between 1800 and 2050. Coastlines are from Natural Earth (public domain). 3D rendering uses <a href="https://threejs.org">three.js</a>.</p>
       </div>
     </section>

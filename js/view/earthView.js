@@ -1,15 +1,19 @@
 // Earth-centred 3D view built with three.js.
 // Everything orbital lives in the `eci` group, whose local axes are the
 // Earth-centred inertial frame (z = north); the group is rotated so that
-// north points up on screen. Units are kilometres.
+// north points up on screen. Units are kilometres. Other bodies (the Moon,
+// planets, their moons) each get a child group positioned at the body, and
+// anything orbiting them is drawn in that group's local coordinates, which
+// keeps GPU precision even billions of kilometres from Earth.
 
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { R_EARTH, R_MOON } from '../core/constants.js';
+import { BODIES, MOON_IDS, PLANET_IDS, orbitNormal, positionRelEarth } from '../core/bodies.js';
 import { moonPositionEci, sunPositionEci } from '../core/ephemeris.js';
 import { gmst } from '../core/time.js';
 import { CATEGORIES } from '../data/catalog.js';
-import { dotTexture, earthTextures, glowTexture, moonTexture } from './textures.js';
+import { bodyTexture, dotTexture, earthTextures, glowTexture, moonTexture, ringTexture } from './textures.js';
 
 const TRAIL_MAX = 6000;
 const PATH_MAX = 400;
@@ -37,20 +41,26 @@ function writeLine(line, points, offset = null) {
   attr.needsUpdate = true;
   line.geometry.setDrawRange(0, n);
   line.geometry.computeBoundingSphere();
-  if (line.material.isLineDashedMaterial) line.computeLineDistances();
+  if (line.material.isLineDashedMaterial && n > 1) {
+    line.computeLineDistances();
+    // Scale dashes to the path so small and huge orbits both look dashed.
+    const total = line.geometry.attributes.lineDistance.array[n - 1];
+    line.material.dashSize = total / 160;
+    line.material.gapSize = total / 260;
+  }
 }
 
 export class EarthView {
   constructor(renderer, sites) {
     this.renderer = renderer;
     this.scene = new THREE.Scene();
-    this.camera = new THREE.PerspectiveCamera(45, 1, 0.05, 2e9);
+    this.camera = new THREE.PerspectiveCamera(45, 1, 0.05, 5e10);
     this.camera.position.set(14000, 9000, 22000);
     this.controls = new OrbitControls(this.camera, renderer.domElement);
     this.controls.enableDamping = true;
     this.controls.dampingFactor = 0.08;
     this.controls.minDistance = R_EARTH * 1.05;
-    this.controls.maxDistance = 3e6;
+    this.controls.maxDistance = 5e9;
     this.controls.zoomSpeed = 1.2;
 
     this.eci = new THREE.Group();
@@ -67,6 +77,7 @@ export class EarthView {
     this.buildStars();
     this.buildEarth(sites);
     this.buildMoon();
+    this.buildBodies();
     this.buildMissionObjects();
     this.buildHighlights();
   }
@@ -74,8 +85,9 @@ export class EarthView {
   // ------------------------------------------------------------------ build
 
   buildLights() {
-    this.sunLight = new THREE.DirectionalLight(0xffffff, 3.2);
-    this.scene.add(this.sunLight, this.sunLight.target);
+    // A point light at the Sun (no fall-off) lights every body from the right side.
+    this.sunLight = new THREE.PointLight(0xffffff, 3.2, 0, 0);
+    this.scene.add(this.sunLight);
     this.scene.add(new THREE.AmbientLight(0x6d7fa8, 0.25));
 
     const sunMat = new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(glowTexture('rgba(255,250,235,1)', 'rgba(255,200,120,0)', 256, 0.18)), blending: THREE.AdditiveBlending, depthWrite: false });
@@ -221,6 +233,59 @@ export class EarthView {
     this.moonOrbitMs = null;
   }
 
+  // Planets and the planets' moons, each in a group placed at the body.
+  buildBodies() {
+    this.bodyObjs = {};
+    const dotTex = new THREE.CanvasTexture(dotTexture());
+    for (const id of [...PLANET_IDS, ...MOON_IDS]) {
+      const b = BODIES[id];
+      const group = new THREE.Group();
+      this.eci.add(group);
+      const tex = new THREE.CanvasTexture(bodyTexture(id));
+      tex.colorSpace = THREE.SRGBColorSpace;
+      const seg = b.parent === 'sun' ? 72 : 40;
+      const mesh = new THREE.Mesh(new THREE.SphereGeometry(b.radius, seg, seg / 2), new THREE.MeshPhongMaterial({ map: tex, shininess: 4, specular: 0x111111 }));
+      const pole = new THREE.Vector3(...(b.parent === 'sun' ? b.poleDir : orbitNormal(id)));
+      mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), pole);
+      group.add(mesh);
+      if (id === 'saturn') {
+        const inner = b.radius * 1.24, outer = b.radius * 2.27;
+        const ringTex = new THREE.CanvasTexture(ringTexture(1024, inner, outer));
+        ringTex.colorSpace = THREE.SRGBColorSpace;
+        const ring = new THREE.Mesh(new THREE.RingGeometry(inner, outer, 160), new THREE.MeshBasicMaterial({ map: ringTex, side: THREE.DoubleSide, transparent: true, depthWrite: false }));
+        ring.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), pole);
+        group.add(ring);
+      }
+      const dg = new THREE.BufferGeometry();
+      dg.setAttribute('position', new THREE.BufferAttribute(new Float32Array(3), 3));
+      const dot = new THREE.Points(dg, new THREE.PointsMaterial({ size: b.parent === 'sun' ? 6 : 4, sizeAttenuation: false, color: new THREE.Color(b.color), map: dotTex, transparent: true, alphaTest: 0.4 }));
+      dot.frustumCulled = false;
+      group.add(dot);
+      this.bodyObjs[id] = { group, mesh, dot };
+    }
+    // Moon orbits, drawn in their planet's group.
+    for (const id of MOON_IDS) {
+      const b = BODIES[id];
+      const [n, w] = b.basis;
+      const pts = [];
+      for (let k = 0; k <= 180; k++) {
+        const th = (k / 180) * Math.PI * 2;
+        pts.push([b.a * (n[0] * Math.cos(th) + w[0] * Math.sin(th)), b.a * (n[1] * Math.cos(th) + w[1] * Math.sin(th)), b.a * (n[2] * Math.cos(th) + w[2] * Math.sin(th))]);
+      }
+      const line = new THREE.Line(lineGeometry(181), new THREE.LineBasicMaterial({ color: new THREE.Color(b.color), transparent: true, opacity: 0.3 }));
+      writeLine(line, pts);
+      this.bodyObjs[b.parent].group.add(line);
+      this.bodyObjs[id].orbitLine = line;
+    }
+  }
+
+  // Scene group whose origin is a given centre body.
+  frameGroup(center) {
+    if (center === 'earth') return this.eci;
+    if (center === 'moon') return this.moonFrame;
+    return this.bodyObjs[center]?.group || null;
+  }
+
   buildMissionObjects() {
     const glow = new THREE.CanvasTexture(glowTexture('rgba(255,236,150,1)', 'rgba(255,190,60,0)', 128, 0.2));
     const cg = new THREE.BufferGeometry();
@@ -230,13 +295,12 @@ export class EarthView {
     this.craft.visible = false;
     this.eci.add(this.craft);
 
-    this.trail = new THREE.Line(lineGeometry(TRAIL_MAX), new THREE.LineBasicMaterial({ color: 0xffd24d, transparent: true, opacity: 0.9 }));
-    this.trailMoon = new THREE.Line(lineGeometry(TRAIL_MAX), new THREE.LineBasicMaterial({ color: 0xffd24d, transparent: true, opacity: 0.9 }));
+    // Flown trail per centre body (created on demand) and one predicted path.
+    this.trails = {};
     this.path = new THREE.Line(lineGeometry(PATH_MAX), new THREE.LineDashedMaterial({ color: 0x5ce1e6, dashSize: 250, gapSize: 180, transparent: true, opacity: 0.85 }));
-    this.pathMoon = new THREE.Line(lineGeometry(PATH_MAX), new THREE.LineDashedMaterial({ color: 0x5ce1e6, dashSize: 60, gapSize: 40, transparent: true, opacity: 0.85 }));
-    for (const l of [this.trail, this.trailMoon, this.path, this.pathMoon]) { l.frustumCulled = false; l.visible = false; }
-    this.eci.add(this.trail, this.path);
-    this.moonFrame.add(this.trailMoon, this.pathMoon);
+    this.path.frustumCulled = false;
+    this.path.visible = false;
+    this.eci.add(this.path);
 
     const pg = new THREE.BufferGeometry();
     pg.setAttribute('position', new THREE.BufferAttribute(new Float32Array(6 * 3 * 2), 3));
@@ -300,7 +364,7 @@ export class EarthView {
     const sun = sunPositionEci(ms);
     const sunW = eciToWorld(sun);
     this.sunDirWorld = sunW.clone().normalize();
-    this.sunLight.position.copy(this.sunDirWorld).multiplyScalar(1e6);
+    this.sunLight.position.copy(sunW);
     this.sunSprite.position.copy(sunW);
     this.atmosphere.material.uniforms.sunDir.value.copy(this.sunDirWorld);
 
@@ -321,6 +385,23 @@ export class EarthView {
     }
     this.moonOrbit.visible = this.options.moonOrbit;
     this.grid.visible = this.options.grid;
+
+    // Planets and their moons. A moon's dot only shows near its planet, where
+    // it can be told apart from the planet's own dot.
+    const camEci = [this.camera.position.x, -this.camera.position.z, this.camera.position.y];
+    this.bodyEci = {};
+    for (const [id, o] of Object.entries(this.bodyObjs)) {
+      const p = positionRelEarth(id, ms);
+      this.bodyEci[id] = p;
+      o.group.position.set(p[0], p[1], p[2]);
+    }
+    for (const id of MOON_IDS) {
+      const parent = BODIES[id].parent;
+      const pp = this.bodyEci[parent];
+      const near = Math.hypot(camEci[0] - pp[0], camEci[1] - pp[1], camEci[2] - pp[2]) < BODIES[parent].soi * 0.6;
+      this.bodyObjs[id].dot.visible = near;
+      this.bodyObjs[id].orbitLine.visible = near && this.options.moonOrbit;
+    }
     this.sitePoints.visible = this.options.sites;
 
     // Shrink catalogue dots when zoomed far out so they don't swamp the Earth.
@@ -335,36 +416,59 @@ export class EarthView {
     this.updateHighlights(ms, selected, hovered);
   }
 
+  // Move an object into the scene group of a centre body.
+  attach(obj, center) {
+    const g = this.frameGroup(center) || this.eci;
+    if (obj.parent !== g) g.add(obj);
+  }
+
   updateMission(mission, nearest, threshold) {
     const on = !!mission;
     this.craft.visible = on;
-    this.trail.visible = on;
-    this.trailMoon.visible = on && mission.trail.moon.length > 1;
+    for (const t of Object.values(this.trails)) t.visible = on && t.userData.center in (mission?.trail || {});
     if (!on) {
-      this.path.visible = this.pathMoon.visible = this.proxLines.visible = false;
+      this.path.visible = this.proxLines.visible = false;
       return;
     }
     const p = mission.positionEci();
     this.craftEci = p;
+    // The craft marker sits in its centre body's group, in local coordinates.
+    const center = mission.phase === 'ascent' || mission.phase === 'countdown' || !this.frameGroup(mission.frame) ? 'earth' : mission.frame;
+    const local = center === 'earth' ? p : mission.r;
+    this.attach(this.craft, center);
     const a = this.craft.geometry.attributes.position;
-    a.array[0] = p[0]; a.array[1] = p[1]; a.array[2] = p[2];
+    a.array[0] = local[0]; a.array[1] = local[1]; a.array[2] = local[2];
     a.needsUpdate = true;
-    writeLine(this.trail, mission.trail.earth);
-    writeLine(this.trailMoon, mission.trail.moon);
+
+    for (const [c, pts] of Object.entries(mission.trail)) {
+      if (!this.frameGroup(c) || pts.length < 2) continue; // heliocentric legs show in the solar-system view
+      let line = this.trails[c];
+      if (!line) {
+        line = new THREE.Line(lineGeometry(TRAIL_MAX), new THREE.LineBasicMaterial({ color: 0xffd24d, transparent: true, opacity: 0.9 }));
+        line.frustumCulled = false;
+        line.userData.center = c;
+        this.trails[c] = line;
+        this.attach(line, c);
+      }
+      line.visible = true;
+      writeLine(line, pts);
+    }
 
     // Predicted path: refresh a few times per second.
     const now = performance.now();
     if (!this.pathStamp || now - this.pathStamp > 250) {
       this.pathStamp = now;
       const pred = mission.predictedPath();
-      this.path.visible = !!pred && pred.frame === 'earth';
-      this.pathMoon.visible = !!pred && pred.frame === 'moon';
-      if (pred) writeLine(pred.frame === 'moon' ? this.pathMoon : this.path, pred.points);
+      this.path.visible = !!pred && !!this.frameGroup(pred.frame);
+      if (this.path.visible) {
+        this.attach(this.path, pred.frame);
+        writeLine(this.path, pred.points);
+      }
     }
 
     // Lines to the nearest objects.
     const close = (nearest || []).filter((it) => it.distance < Math.max(1500, threshold * 2)).slice(0, 3);
-    const show = this.options.proximity && close.length && mission.phase !== 'countdown';
+    const show = this.options.proximity && close.length && mission.phase !== 'countdown' && (mission.frame === 'earth' || mission.phase === 'ascent');
     this.proxLines.visible = !!show;
     if (show) {
       const pos = this.proxLines.geometry.attributes.position;
@@ -406,8 +510,11 @@ export class EarthView {
 
   // ------------------------------------------------------------------ camera
 
-  // mode: 'earth' | 'follow' | 'moon' | 'earthmoon'; fn returns an ECI position.
-  setView(mode, followFn = null, followDist = 900) {
+  // mode: 'earth' | 'follow' | 'moon' | 'earthmoon' | 'body'; followFn returns
+  // an ECI position. For 'body', viewDir (world) is the side to look from; for
+  // 'follow' it is the "up" direction from the body being orbited (default:
+  // away from Earth).
+  setView(mode, followFn = null, followDist = 900, viewDir = null) {
     this.mode = mode;
     const fromTarget = this.controls.target.clone();
     const fromOffset = this.camera.position.clone().sub(fromTarget);
@@ -415,13 +522,14 @@ export class EarthView {
     if (mode === 'earth') { this.followFn = null; dist = 26000; this.controls.minDistance = R_EARTH * 1.05; }
     else if (mode === 'earthmoon') { this.followFn = null; dist = 1.05e6; this.controls.minDistance = R_EARTH * 1.05; }
     else if (mode === 'moon') { this.followFn = () => this.moonEci; dist = 9000; this.controls.minDistance = R_MOON * 1.05; }
-    else { this.followFn = followFn; dist = followDist; this.controls.minDistance = 2; }
+    else if (mode === 'body') { this.followFn = followFn; dist = followDist; this.controls.minDistance = followDist / 6; }
+    else { this.followFn = followFn; dist = followDist; this.controls.minDistance = 0.05; }
     let dir = fromOffset.lengthSq() > 0 ? fromOffset.clone().normalize() : new THREE.Vector3(0.5, 0.35, 0.8).normalize();
     if (mode === 'earthmoon') dir.set(0.3, 0.7, 0.65).normalize();
     if (mode === 'follow' || mode === 'moon') {
       // Satellites: look from above and to the side, Earth as backdrop.
       // Moon: look from the Earth side, so we see the familiar near side.
-      const up = this.targetWorld().normalize();
+      const up = mode === 'follow' && viewDir ? viewDir.clone().normalize() : this.targetWorld().normalize();
       if (up.lengthSq() > 0) {
         let side = new THREE.Vector3().crossVectors(up, new THREE.Vector3(0, 1, 0));
         if (side.lengthSq() < 1e-6) side = new THREE.Vector3(1, 0, 0);
@@ -429,6 +537,7 @@ export class EarthView {
         dir = up.multiplyScalar(mode === 'moon' ? -0.8 : 0.75).add(side.multiplyScalar(0.55)).add(new THREE.Vector3(0, 0.35, 0)).normalize();
       }
     }
+    if (mode === 'body' && viewDir) dir = viewDir.clone().normalize();
     this.tween = { t0: performance.now(), dur: 1100, fromTarget, fromOffset, toOffset: dir.multiplyScalar(dist) };
   }
 
@@ -465,6 +574,7 @@ export class EarthView {
 
   render() {
     this.updateCamera();
+    this.stars.position.copy(this.camera.position); // the star field is "at infinity"
     this.renderer.render(this.scene, this.camera);
   }
 
@@ -478,7 +588,10 @@ export class EarthView {
     const e = m.elements;
     const w = this.renderer.domElement.clientWidth, h = this.renderer.domElement.clientHeight;
     const cam = this.camera.position;
-    const moon = this.moonEci ? eciToWorld(this.moonEci) : null;
+    // Spheres that can hide things: Earth, the Moon, planets and their moons.
+    const spheres = [[0, 0, 0, R_EARTH]];
+    if (this.moonEci) { const m = eciToWorld(this.moonEci); spheres.push([m.x, m.y, m.z, R_MOON]); }
+    for (const [id, p] of Object.entries(this.bodyEci || {})) spheres.push([p[0], p[2], -p[1], BODIES[id].radius]);
     return {
       project(x, y, z) {
         const cw = e[3] * x + e[7] * y + e[11] * z + e[15];
@@ -487,7 +600,7 @@ export class EarthView {
         const cy = (e[1] * x + e[5] * y + e[9] * z + e[13]) / cw;
         return [((cx + 1) / 2) * w, ((1 - cy) / 2) * h];
       },
-      // Is the ECI point hidden behind the Earth or the Moon?
+      // Is the ECI point hidden behind a planet or moon?
       occluded(x, y, z) {
         const px = x, py = z, pz = -y; // world coordinates
         const hit = (ox, oy, oz, r) => {
@@ -498,7 +611,7 @@ export class EarthView {
           const qx = cam.x + t * dx - ox, qy = cam.y + t * dy - oy, qz = cam.z + t * dz - oz;
           return qx * qx + qy * qy + qz * qz < r * r * 0.98;
         };
-        return hit(0, 0, 0, R_EARTH) || (moon && hit(moon.x, moon.y, moon.z, R_MOON));
+        return spheres.some(([ox, oy, oz, r]) => hit(ox, oy, oz, r));
       },
     };
   }

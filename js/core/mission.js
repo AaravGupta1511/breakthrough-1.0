@@ -1,12 +1,20 @@
 // Mission timeline: countdown -> powered ascent -> coast arcs joined by
-// impulsive burns (circularisation, GTO/GEO, trans-lunar injection, lunar
-// orbit insertion). Coast arcs are propagated analytically, so any amount of
-// time warp stays exact.
+// impulsive burns. Each coast arc is a two-body conic around one "centre"
+// body (Earth, Moon, Sun, a planet or a planet's moon), propagated
+// analytically so any amount of time warp stays exact. Crossing a sphere of
+// influence switches the centre (patched conics).
+//
+// Missions: Earth orbits, GEO via GTO, the Moon, the planets (launch window,
+// escape burn, cruise with a trajectory correction, capture), and moons of
+// the planets (capture at the planet, transfer to the moon, orbit insertion;
+// rendezvous for moons too small to orbit).
 
-import { MOON_SOI, MU_EARTH, MU_MOON, R_EARTH, R_MOON } from './constants.js';
+import { MU_EARTH, MU_SUN, R_EARTH } from './constants.js';
 import { Ascent, MAX_DIRECT_INSERTION_ALT } from './ascent.js';
-import { moonPositionEci, moonVelocityEci } from './ephemeris.js';
-import { lambertDeltaV } from './lambert.js';
+import { BODIES, ECLIPTIC_NORTH, MOON_IDS, PLANET_IDS, helioPosition, orbitNormal, positionRelEarth, stateRelTo, systemPlanet } from './bodies.js';
+import { moonPositionEci } from './ephemeris.js';
+import { captureOrbit, departurePoint, escapeDeltaV, findTransferWindow, planeContaining } from './interplanetary.js';
+import { lambertDeltaV, solveLambert } from './lambert.js';
 import { propagate, stateToElements, sunSyncInclination } from './orbits.js';
 import { eciToGeo, geoToEci } from './time.js';
 import { add, cross, dist, dot, norm, scale, sub, unit } from './vec.js';
@@ -14,16 +22,31 @@ import { add, cross, dist, dot, norm, scale, sub, unit } from './vec.js';
 export const R_GEO = 42164.17;
 const COUNTDOWN = 10; // s
 const TRAIL_MAX = 6000;
-const LUNAR_ORBIT_ALT = 100; // km
+const DEPARTURE_LEAD = 2 * 3600e3; // launch this long before the ideal escape burn
+const STATION_KEEPING = 20;        // km above a small moon's surface
 
 export const TARGETS = {
-  leo: { label: 'Low Earth orbit (custom)', alt: 400, inc: null, editableInc: true, editableAlt: true },
-  iss: { label: 'ISS orbit (420 km, 51.6°)', alt: 420, inc: 51.64 },
-  sso: { label: 'Sun-synchronous orbit', alt: 600, inc: 'sso', editableAlt: true },
-  polar: { label: 'Polar orbit', alt: 500, inc: 90, editableAlt: true },
-  geo: { label: 'Geostationary (via GTO)', alt: 200, inc: null, parking: true },
-  moon: { label: 'Moon (TLI + lunar orbit)', alt: 185, inc: null, parking: true },
+  leo: { label: 'Low Earth orbit (custom)', group: 'Earth orbit', alt: 400, inc: null, editableInc: true, editableAlt: true },
+  iss: { label: 'ISS orbit (420 km, 51.6°)', group: 'Earth orbit', alt: 420, inc: 51.64 },
+  sso: { label: 'Sun-synchronous orbit', group: 'Earth orbit', alt: 600, inc: 'sso', editableAlt: true },
+  polar: { label: 'Polar orbit', group: 'Earth orbit', alt: 500, inc: 90, editableAlt: true },
+  geo: { label: 'Geostationary (via GTO)', group: 'Earth orbit', alt: 200, inc: null, parking: true },
+  moon: { label: 'The Moon (TLI + lunar orbit)', group: 'The Moon', alt: 185, inc: null, parking: true, body: 'moon' },
 };
+for (const id of PLANET_IDS) TARGETS[id] = { label: BODIES[id].name, group: 'Planets', alt: 200, inc: null, parking: true, body: id };
+for (const id of MOON_IDS) {
+  const b = BODIES[id];
+  TARGETS[id] = { label: `${b.name} (${BODIES[b.parent].name})`, group: 'Moons of other planets', alt: 200, inc: null, parking: true, body: id };
+}
+
+// Destinations beyond the Earth–Moon system need a launch window.
+export const isInterplanetary = (targetId) => {
+  const body = TARGETS[targetId]?.body;
+  return !!body && systemPlanet(body) !== 'earth';
+};
+
+// Launch time for an interplanetary window: shortly before the escape burn.
+export const launchTimeFor = (window, nowMs) => Math.max(nowMs, window.departMs - DEPARTURE_LEAD);
 
 // Resolve the inclination actually requested for a target from a given site.
 export function targetInclination(targetId, altKm, site, customInc) {
@@ -35,12 +58,15 @@ export function targetInclination(targetId, altKm, site, customInc) {
 }
 
 export class Mission {
-  constructor({ vehicle, payload, site, targetId, altitude, inclination, startMs }) {
+  // `window` (from findTransferWindow) is used for planets and their moons;
+  // it is computed here if not supplied.
+  constructor({ vehicle, payload, site, targetId, altitude, inclination, startMs, window = null }) {
     this.vehicle = vehicle;
     this.payload = payload;
     this.site = site;
     this.targetId = targetId;
     this.targetAlt = altitude;
+    this.destination = TARGETS[targetId].body || null;
     this.launchMs = startMs + COUNTDOWN * 1000;
     this.createdMs = startMs;
     this.phase = 'countdown';
@@ -50,11 +76,17 @@ export class Mission {
     this.maneuvers = [];
     this.arc = null;
     this.status = '';
-    this.trail = { earth: [], moon: [] };
-    this.groundTrack = []; // [lat, lon] while in the Earth frame
+    this.trail = { earth: [] }; // per centre body
+    this.groundTrack = [];      // [lat, lon] while in the Earth frame
     this.lastTrailMs = null;
 
-    const planeNormal = targetId === 'moon' ? lunarPlaneNormal(site, this.launchMs) : null;
+    let planeNormal = null;
+    if (targetId === 'moon') planeNormal = lunarPlaneNormal(site, this.launchMs);
+    if (isInterplanetary(targetId)) {
+      this.window = window || findTransferWindow(systemPlanet(this.destination), startMs, altitude, this.destination);
+      // Launch into the plane that contains the escape direction.
+      planeNormal = planeContaining(geoToEci(site.lat, site.lon, 1, this.launchMs), this.window.vInfDep);
+    }
     this.ascent = new Ascent({
       vehicle, payload, site, launchMs: this.launchMs,
       targetAlt: altitude, inclination, planeNormal,
@@ -79,7 +111,7 @@ export class Mission {
   update(ms) {
     if (ms < this.now) return; // no rewinding
     let guard = 0;
-    while (guard++ < 20) {
+    while (guard++ < 30) {
       if (this.phase === 'countdown') {
         if (ms < this.launchMs) break;
         this.phase = 'ascent';
@@ -98,6 +130,7 @@ export class Mission {
         const next = this.maneuvers[0];
         if (next && next.ms <= ms) {
           this.maneuvers.shift();
+          this.recordTrail(next.ms); // keep the flown path continuous across frame changes
           const s = this.stateAtArc(next.ms);
           next.apply(s, next.ms);
           continue;
@@ -130,23 +163,25 @@ export class Mission {
     }
     const s = this.stateAtArc(ms);
     this.r = s.r; this.v = s.v;
-    if (this.frame === 'earth' && norm(this.r) < R_EARTH) {
-      this.fail(ms, 'Orbit decayed: the vehicle re-entered and hit the surface.');
-    } else if (this.frame === 'moon' && norm(this.r) < R_MOON) {
-      this.fail(ms, 'Impacted the lunar surface.');
+    const body = BODIES[this.frame];
+    if (!this.arc.hold && this.frame !== 'sun' && norm(this.r) < body.radius) {
+      this.fail(ms, this.frame === 'earth' ? 'Orbit decayed: the vehicle re-entered and hit the surface.'
+        : this.frame === 'moon' ? 'Impacted the lunar surface.' : `Impacted ${body.name}.`);
     }
   }
 
-  // State on the current coast arc (in the current frame).
+  // State on the current coast arc (relative to the current centre body).
   stateAtArc(ms) {
     const a = this.arc;
+    if (a.hold) return { r: [...a.r], v: [0, 0, 0] };
     return propagate(a.r, a.v, (ms - a.ms) / 1000, a.mu);
   }
 
-  setArc(ms, r, v, frame = this.frame) {
+  setArc(ms, r, v, frame = this.frame, hold = false) {
     this.frame = frame;
-    this.arc = { ms, r, v, mu: frame === 'moon' ? MU_MOON : MU_EARTH };
+    this.arc = { ms, r, v, mu: BODIES[frame].mu, center: frame, hold };
     this.r = r; this.v = v;
+    if (!this.trail[frame]) this.trail[frame] = [];
   }
 
   fail(ms, message) {
@@ -182,7 +217,14 @@ export class Mission {
       return;
     }
     if (this.targetId === 'geo') { this.planGto(tMs); return; }
-    if (this.targetId === 'moon') { this.planTli(tMs); return; }
+    if (this.targetId === 'moon') {
+      this.planBodyTransfer(tMs, 'moon', {
+        tofs: [3, 3.5, 4, 4.5, 5].map((d) => d * 86400), span: el.period * 1.5, step: 60,
+        name: 'Trans-lunar injection', performer: 'upper stage', upperStage: true,
+      });
+      return;
+    }
+    if (this.window) { this.planDeparture(tMs); return; }
     if (this.targetAlt > MAX_DIRECT_INSERTION_ALT && el.e > 0.002) {
       this.planCircularisation(tMs, 'Circularisation burn', `Raise perigee to ${this.targetAlt.toFixed(0)} km`);
     } else {
@@ -202,10 +244,28 @@ export class Mission {
     this.log(ms, 'Mission incomplete', text, 'warn');
   }
 
+  // Upper-stage burns are limited by the propellant left after the ascent.
+  checkUpperStage(ms, dvVec, burnName) {
+    const need = norm(dvVec) * 1000;
+    const have = this.ascent.remainingDeltaV();
+    if (need <= have + 1) return true;
+    this.incomplete(ms, `Not enough propellant for ${burnName.charAt(0).toLowerCase() + burnName.slice(1)}: the upper stage has ${have.toFixed(0)} m/s left but needs ${need.toFixed(0)} m/s. Stranded in the parking orbit — try a lighter payload.`);
+    return false;
+  }
+
   burn(ms, name, dvVec, detail, performer) {
     const dv = norm(dvVec) * 1000;
     this.burns.push({ ms, name, dv, performer });
     this.log(ms, name, `${detail}${detail ? ' · ' : ''}Δv ${dv.toFixed(0)} m/s${performer ? ` (${performer})` : ''}`, 'burn');
+  }
+
+  schedule(ms, name, apply) {
+    this.maneuvers.push({ ms, name, apply });
+    this.maneuvers.sort((a, b) => a.ms - b.ms);
+  }
+
+  performer() {
+    return this.vehicle.upperStageCanRestart ? 'upper stage restart' : 'payload thrusters';
   }
 
   // Burn to circular at the next apoapsis.
@@ -220,15 +280,6 @@ export class Mission {
     });
   }
 
-  performer() {
-    return this.vehicle.upperStageCanRestart ? 'upper stage restart' : 'payload thrusters';
-  }
-
-  schedule(ms, name, apply) {
-    this.maneuvers.push({ ms, name, apply });
-    this.maneuvers.sort((a, b) => a.ms - b.ms);
-  }
-
   // GEO: burn at an equator crossing so apogee lands on the equator, then
   // circularise and remove the inclination at apogee.
   planGto(fromMs) {
@@ -238,12 +289,7 @@ export class Mission {
       const rm = norm(s.r);
       const vp = Math.sqrt((2 * MU_EARTH * R_GEO) / (rm * (rm + R_GEO)));
       const vNew = scale(unit(s.v), vp);
-      const need = norm(sub(vNew, s.v)) * 1000;
-      const have = this.ascent.remainingDeltaV();
-      if (need > have + 1) {
-        this.incomplete(ms, `Not enough propellant for GTO injection: the upper stage has ${have.toFixed(0)} m/s left but needs ${need.toFixed(0)} m/s. Stranded in the parking orbit — try a lighter payload.`);
-        return;
-      }
+      if (!this.checkUpperStage(ms, sub(vNew, s.v), 'GTO injection')) return;
       this.setArc(ms, s.r, vNew);
       this.burn(ms, 'GTO injection', sub(vNew, s.v), `Apogee raised to ${(R_GEO - R_EARTH).toFixed(0)} km`, 'upper stage');
       const tApo = ms + timeToApsis(this.arc, ms, 'apo') * 1000;
@@ -256,77 +302,216 @@ export class Mission {
     });
   }
 
-  // Moon: scan the next ~1.5 parking orbits for the cheapest Lambert arc to
-  // where the Moon will be, fly it, correct on SOI entry, brake into orbit.
-  planTli(fromMs) {
-    const el = stateToElements(this.arc.r, this.arc.v);
+  // Scan departure times on the current orbit and flight times for the
+  // cheapest Lambert arc to a body orbiting the current centre (the Moon from
+  // Earth orbit, or a planet's moon from a capture orbit), then fly it.
+  planBodyTransfer(fromMs, targetId, { tofs, span, step, name, performer, upperStage = false, includeArrival = false }) {
+    const center = this.frame;
+    const mu = BODIES[center].mu;
+    const target = BODIES[targetId];
+    const arrivalCost = (vRel) => (target.small ? vRel : escapeDeltaV(vRel, target.radius + target.orbitAlt, target.mu));
     let best = null;
-    const tofs = [3, 3.5, 4, 4.5, 5].map((d) => d * 86400);
-    for (let dt = 300; dt < el.period * 1.5; dt += 60) {
+    for (let dt = 300; dt < span; dt += step) {
       const ms = fromMs + dt * 1000;
       const s = this.stateAtArc(ms);
       for (const tof of tofs) {
-        const moon = moonPositionEci(ms + tof * 1000);
-        const sol = lambertDeltaV(s.r, s.v, moon, tof);
-        if (sol && (!best || sol.dvMag < best.dvMag)) best = { ...sol, ms, tof };
+        const tgt = stateRelTo(targetId, center, ms + tof * 1000);
+        const sol = lambertDeltaV(s.r, s.v, tgt.r, tof, mu);
+        if (!sol) continue;
+        const cost = sol.dvMag + (includeArrival ? arrivalCost(norm(sub(sol.v2, tgt.v))) : 0);
+        if (!best || cost < best.cost) best = { ...sol, ms, tof, cost };
       }
     }
-    if (!best) { this.incomplete(fromMs, 'No lunar transfer found from this parking orbit.'); return; }
-    this.log(fromMs, 'Parking orbit', `TLI planned: ${(best.dvMag * 1000).toFixed(0)} m/s, ${(best.tof / 86400).toFixed(1)}-day coast`);
-    this.schedule(best.ms, 'Trans-lunar injection', (s, ms) => {
-      const need = best.dvMag * 1000;
-      const have = this.ascent.remainingDeltaV();
-      if (need > have + 1) {
-        this.incomplete(ms, `Not enough propellant for trans-lunar injection: the upper stage has ${have.toFixed(0)} m/s left but needs ${need.toFixed(0)} m/s. Stranded in the parking orbit — try a lighter payload.`);
+    if (!best) { this.incomplete(fromMs, `No transfer to ${target.name} found from this orbit.`); return; }
+    const days = best.tof / 86400;
+    const when = days >= 1 ? `${days.toFixed(1)}-day coast` : `${(best.tof / 3600).toFixed(1)}-hour coast`;
+    this.log(fromMs, targetId === 'moon' ? 'Parking orbit' : 'Transfer planned', `${name} planned: ${(best.dvMag * 1000).toFixed(0)} m/s, ${when}`);
+    this.schedule(best.ms, name, (s, ms) => {
+      // Re-solve from the exact state at the burn to keep the arrival accurate.
+      const tgt = stateRelTo(targetId, center, best.ms + best.tof * 1000);
+      let sol = lambertDeltaV(s.r, s.v, tgt.r, best.tof, mu) || best;
+      if (targetId !== 'moon' && !target.small) {
+        // Aim beside the moon, at the miss distance that makes the flyby's
+        // periapsis equal the target orbit, so little correction is needed on arrival.
+        const vRel = sub(sol.v2, tgt.v);
+        let side = cross(vRel, orbitNormal(targetId));
+        if (norm(side) < 1e-6 * norm(vRel)) side = cross(vRel, [0, 0, 1]);
+        const rp = target.radius + target.orbitAlt;
+        const b = rp * Math.sqrt(1 + (2 * target.mu) / (rp * dot(vRel, vRel)));
+        const aimed = lambertDeltaV(s.r, s.v, add(tgt.r, scale(unit(side), b)), best.tof, mu);
+        if (aimed) sol = aimed;
+      }
+      if (upperStage && !this.checkUpperStage(ms, sol.dv, name)) return;
+      this.setArc(ms, s.r, sol.vDepart);
+      const detail = targetId === 'moon' ? `Heading for the Moon, arrival in ${days.toFixed(1)} days` : `Heading for ${target.name}, arrival in ${days >= 1 ? `${days.toFixed(1)} days` : `${(best.tof / 3600).toFixed(1)} hours`}`;
+      this.burn(ms, name, sol.dv, detail, performer);
+      const arriveMs = ms + best.tof * 1000;
+      if (target.small) {
+        this.schedule(arriveMs, `Rendezvous with ${target.name}`, (s2, ms2) => this.rendezvous(s2, ms2, targetId));
         return;
       }
-      this.setArc(ms, s.r, best.vDepart);
-      this.burn(ms, 'Trans-lunar injection', best.dv, `Heading for the Moon, arrival in ${(best.tof / 86400).toFixed(1)} days`, 'upper stage');
-      const tSoi = findSoiEntry(this.arc, ms, best.tof + 86400);
-      if (tSoi == null) { this.log(ms, 'Warning', 'Trajectory misses the Moon’s sphere of influence', 'warn'); return; }
-      this.schedule(tSoi, 'Lunar SOI entry', (s2, ms2) => this.enterLunarSoi(s2, ms2));
+      const tSoi = findSoiEntry(this.arc, ms, arriveMs + (best.tof * 1000) / 2, targetId);
+      if (tSoi == null) { this.log(ms, 'Warning', `Trajectory misses ${target.name}’s sphere of influence`, 'warn'); return; }
+      this.schedule(tSoi, targetId === 'moon' ? 'Lunar SOI entry' : `Arrival at ${target.name}`, (s2, ms2) => this.enterMoonSoi(s2, ms2, targetId));
     });
   }
 
-  enterLunarSoi(s, ms) {
-    const rRel = sub(s.r, moonPositionEci(ms));
-    const vRel = sub(s.v, moonVelocityEci(ms));
-    this.log(ms, 'Lunar SOI entry', `Now dominated by lunar gravity at ${(norm(rRel) / 1000).toFixed(0)},000 km from the Moon`);
-    // Course correction: keep speed, rotate the velocity so periselene is 100 km.
+  // Arrival at a moon: trim for the target periapsis, then brake into a circular orbit.
+  enterMoonSoi(s, ms, moonId) {
+    const moon = BODIES[moonId];
+    const m = stateRelTo(moonId, this.frame, ms);
+    const rRel = sub(s.r, m.r), vRel = sub(s.v, m.v);
+    const lunar = moonId === 'moon';
+    this.log(ms, lunar ? 'Lunar SOI entry' : `Arrival at ${moon.name}`,
+      lunar ? `Now dominated by lunar gravity at ${(norm(rRel) / 1000).toFixed(0)},000 km from the Moon`
+        : `Entered ${moon.name}’s sphere of influence, ${Math.round(norm(rRel)).toLocaleString('en-US')} km away`);
+    const alt = moon.orbitAlt;
+    this.approach(ms, rRel, vRel, moonId, moon.radius + alt, null,
+      lunar ? 'Mid-course correction' : 'Approach correction', `Aim ${lunar ? 'periselene' : 'periapsis'} at ${alt} km`, lunar ? 'spacecraft RCS' : 'spacecraft thrusters');
+    const tPeri = ms + timeToApsis(this.arc, ms, 'peri') * 1000;
+    const name = lunar ? 'Lunar orbit insertion' : `${moon.name} orbit insertion`;
+    this.schedule(tPeri, name, (s2, ms2) => {
+      const vCirc = scale(unit(cross(cross(s2.r, s2.v), s2.r)), Math.sqrt(moon.mu / norm(s2.r)));
+      this.setArc(ms2, s2.r, vCirc, moonId);
+      this.burn(ms2, name, sub(vCirc, s2.v), lunar ? `Captured into a ${alt} km lunar orbit` : `Captured into a ${alt} km orbit around ${moon.name}`, lunar ? 'service module engine' : 'spacecraft main engine');
+      this.complete(ms2, lunar ? `In lunar orbit at ${alt} km` : `In orbit around ${moon.name} at ${alt} km`);
+    });
+  }
+
+  // Moons too small to orbit (Phobos, Deimos): match their velocity and hold station.
+  rendezvous(s, ms, moonId) {
+    const moon = BODIES[moonId];
+    const m = stateRelTo(moonId, this.frame, ms);
+    let dir = sub(s.r, m.r);
+    if (norm(dir) < 1e-3) dir = s.r;
+    const rel = scale(unit(dir), moon.radius + STATION_KEEPING);
+    this.setArc(ms, rel, [0, 0, 0], moonId, true);
+    this.burn(ms, `Rendezvous with ${moon.name}`, sub(m.v, s.v), `Match ${moon.name}’s speed and hold station ${STATION_KEEPING} km above the surface`, 'spacecraft thrusters');
+    this.complete(ms, `Holding station ${STATION_KEEPING} km from ${moon.name} (too small to orbit)`);
+  }
+
+  // Replace the approach velocity so the hyperbola's periapsis is at radius
+  // rp: same speed (energy), rotated within a plane through the current
+  // position — the plane closest to `preferredNormal` if given.
+  approach(ms, rRel, vRel, center, rp, preferredNormal, name, detail, performer) {
+    const mu = BODIES[center].mu;
     const rm = norm(rRel), vm = norm(vRel);
-    const rp = R_MOON + LUNAR_ORBIT_ALT;
-    const energy = (vm * vm) / 2 - MU_MOON / rm;
-    const hNeed = rp * Math.sqrt(2 * (energy + MU_MOON / rp));
+    const energy = (vm * vm) / 2 - mu / rm;
+    const hNeed = rp * Math.sqrt(2 * (energy + mu / rp));
     const rhat = scale(rRel, 1 / rm);
     const vr = dot(vRel, rhat);
-    let tdir = sub(vRel, scale(rhat, vr));
-    if (norm(tdir) < 1e-6) tdir = cross(rhat, [0, 0, 1]);
-    tdir = unit(tdir);
-    const vt = hNeed / rm;
+    let tdir = null;
+    if (preferredNormal) {
+      const n = sub(preferredNormal, scale(rhat, dot(preferredNormal, rhat)));
+      if (norm(n) > 0.05) tdir = unit(cross(n, rhat));
+    }
+    if (!tdir) {
+      tdir = sub(vRel, scale(rhat, vr));
+      if (norm(tdir) < 1e-6) tdir = cross(rhat, [0, 0, 1]);
+      tdir = unit(tdir);
+    }
+    const vt = Math.min(hNeed / rm, vm);
     const vrNew = -Math.sqrt(Math.max(0, vm * vm - vt * vt));
     const vNew = add(scale(rhat, vrNew), scale(tdir, vt));
-    this.setArc(ms, rRel, vNew, 'moon');
-    this.burn(ms, 'Mid-course correction', sub(vNew, vRel), `Aim periselene at ${LUNAR_ORBIT_ALT} km`, 'spacecraft RCS');
+    this.setArc(ms, rRel, vNew, center);
+    this.burn(ms, name, sub(vNew, vRel), detail, performer);
+  }
+
+  // ------------------------------------------------------------ interplanetary
+
+  // Escape burn from the parking orbit at the point where the departure
+  // hyperbola's asymptote lines up with the required excess velocity.
+  planDeparture(fromMs) {
+    const w = this.window;
+    const planet = BODIES[w.planetId];
+    const name = `Trans-${planet.name} injection`;
+    const r0 = norm(this.arc.r);
+    const pHat = departurePoint(w.vInfDep, cross(this.arc.r, this.arc.v), r0);
+    const tBurn = timeToDirection(this.arc, fromMs + 300e3, pHat);
+    const waitDays = (w.departMs - fromMs) / 86400e3;
+    this.log(fromMs, 'Parking orbit', `Escape burn to ${planet.name} planned: C3 ${w.c3.toFixed(1)} km²/s², ${(w.tofDays / 365.25 >= 1.5 ? `${(w.tofDays / 365.25).toFixed(1)}-year` : `${Math.round(w.tofDays)}-day`)} cruise${waitDays > 1 ? ` (window opens in ${waitDays.toFixed(0)} days)` : ''}`);
+    this.schedule(tBurn, name, (s, ms) => {
+      // Keep the planned arrival date: re-solve the heliocentric arc from now.
+      const e = stateRelTo('earth', 'sun', ms);
+      const p = stateRelTo(w.planetId, 'sun', w.arriveMs);
+      const sol = solveLambert(e.r, p.r, (w.arriveMs - ms) / 1000, MU_SUN, ECLIPTIC_NORTH);
+      const vInf = norm(sol ? sub(sol.v1, e.v) : w.vInfDep);
+      const rm = norm(s.r);
+      const vNew = scale(unit(cross(cross(s.r, s.v), s.r)), Math.sqrt(vInf * vInf + (2 * MU_EARTH) / rm));
+      if (!this.checkUpperStage(ms, sub(vNew, s.v), name)) return;
+      this.setArc(ms, s.r, vNew, 'earth');
+      this.burn(ms, name, sub(vNew, s.v), `Escape from Earth at ${vInf.toFixed(2)} km/s excess speed`, 'upper stage');
+      const tExit = findSoiExit(this.arc, ms, BODIES.earth.soi);
+      this.schedule(tExit, 'Leaving Earth’s sphere of influence', (s2, ms2) => this.enterHeliocentric(s2, ms2));
+    });
+  }
+
+  enterHeliocentric(s, ms) {
+    const w = this.window;
+    const planet = BODIES[w.planetId];
+    const e = stateRelTo('earth', 'sun', ms);
+    const r = add(s.r, e.r), v = add(s.v, e.v);
+    this.setArc(ms, r, v, 'sun');
+    this.log(ms, 'Leaving Earth’s sphere of influence', `${Math.round(norm(s.r)).toLocaleString('en-US')} km from Earth — now in orbit around the Sun`);
+    // Trajectory correction: re-aim at the planet for the planned arrival date.
+    const p = stateRelTo(w.planetId, 'sun', w.arriveMs);
+    const sol = solveLambert(r, p.r, (w.arriveMs - ms) / 1000, MU_SUN, ECLIPTIC_NORTH);
+    if (sol) {
+      this.setArc(ms, r, sol.v1, 'sun');
+      this.burn(ms, 'Trajectory correction', sub(sol.v1, v), `Aim for ${planet.name}, arrival ${new Date(w.arriveMs).toISOString().slice(0, 10)}`, 'spacecraft thrusters');
+    }
+    const tSoi = findSoiEntry(this.arc, ms, w.arriveMs + 60 * 86400e3, w.planetId);
+    if (tSoi == null) { this.incomplete(ms, `The trajectory misses ${planet.name}.`); return; }
+    this.schedule(tSoi, `Arrival at ${planet.name}`, (s2, ms2) => this.enterPlanetSoi(s2, ms2));
+  }
+
+  enterPlanetSoi(s, ms) {
+    const planetId = this.window.planetId;
+    const P = BODIES[planetId];
+    const dest = this.destination;
+    const ps = stateRelTo(planetId, 'sun', ms);
+    const rRel = sub(s.r, ps.r), vRel = sub(s.v, ps.v);
+    this.log(ms, `Arrival at ${P.name}`, `Entered ${P.name}’s sphere of influence ${(norm(rRel) / 1e6).toFixed(2)} million km out, approaching at ${norm(vRel).toFixed(2)} km/s`);
+    const cap = captureOrbit(planetId, dest);
+    // Arrive in the planet's equatorial plane (where its moons orbit).
+    const planeNormal = dest === planetId ? P.poleDir : orbitNormal(dest);
+    this.approach(ms, rRel, vRel, planetId, cap.rp, planeNormal, 'Approach correction', `Aim periapsis at ${Math.round(cap.rp - P.radius).toLocaleString('en-US')} km`, 'spacecraft thrusters');
     const tPeri = ms + timeToApsis(this.arc, ms, 'peri') * 1000;
-    this.schedule(tPeri, 'Lunar orbit insertion', (s2, ms2) => {
-      const vCirc = scale(unit(cross(cross(s2.r, s2.v), s2.r)), Math.sqrt(MU_MOON / norm(s2.r)));
-      this.setArc(ms2, s2.r, vCirc, 'moon');
-      this.burn(ms2, 'Lunar orbit insertion', sub(vCirc, s2.v), `Captured into a ${LUNAR_ORBIT_ALT} km lunar orbit`, 'service module engine');
-      this.complete(ms2, `In lunar orbit at ${LUNAR_ORBIT_ALT} km`);
+    const name = `${P.name} orbit insertion`;
+    this.schedule(tPeri, name, (s2, ms2) => {
+      const rm = norm(s2.r);
+      const vCap = Math.sqrt(P.mu * (2 / rm - 2 / (rm + cap.ra)));
+      const vNew = scale(unit(s2.v), vCap);
+      this.setArc(ms2, s2.r, vNew, planetId);
+      const orbit = `${Math.round(rm - P.radius).toLocaleString('en-US')} × ${Math.round(cap.ra - P.radius).toLocaleString('en-US')} km`;
+      this.burn(ms2, name, sub(vNew, s2.v), `Captured into a ${orbit} orbit`, 'spacecraft main engine');
+      if (dest === planetId) { this.complete(ms2, `In orbit around ${P.name}: ${orbit}`); return; }
+      const period = stateToElements(s2.r, vNew, P.mu).period;
+      this.planBodyTransfer(ms2, dest, {
+        tofs: [0.06, 0.1, 0.15, 0.22, 0.3, 0.4, 0.55, 0.7].map((f) => f * period),
+        span: period * 1.2, step: period / 240,
+        name: `Transfer to ${BODIES[dest].name}`, performer: 'spacecraft main engine', includeArrival: true,
+      });
     });
   }
 
   // ------------------------------------------------------------ read-outs
 
-  // Inertial (Earth-centred) position of the vehicle, km.
+  // Position of the vehicle relative to Earth's centre (ECI axes), km.
   positionEci(ms = this.now) {
-    if (this.frame === 'moon' && this.phase !== 'ascent') return add(this.r, moonPositionEci(ms));
-    return this.r;
+    if (this.frame === 'earth' || this.phase === 'ascent' || this.phase === 'countdown') return this.r;
+    return add(this.r, positionRelEarth(this.frame, ms));
   }
 
   velocityEci(ms = this.now) {
-    if (this.frame === 'moon') return add(this.v, moonVelocityEci(ms));
-    return this.v;
+    if (this.frame === 'earth') return this.v;
+    return add(this.v, stateRelTo(this.frame, 'earth', ms).v);
+  }
+
+  // Heliocentric position (equatorial axes), km.
+  positionHelio(ms = this.now) {
+    const center = this.phase === 'ascent' || this.phase === 'countdown' ? 'earth' : this.frame;
+    return add(this.r, helioPosition(center, ms));
   }
 
   nextEvent() {
@@ -335,24 +520,25 @@ export class Mission {
     return null;
   }
 
-  // Orbit through the current state, sampled for drawing (in current frame).
+  // Orbit through the current state, sampled for drawing (in the current frame).
   predictedPath() {
     if (this.phase === 'ascent') {
       const { r, v } = this.ascent.stateEci();
-      return { frame: 'earth', points: samplePath(r, v, MU_EARTH, R_EARTH) };
+      return { frame: 'earth', points: samplePath(r, v, MU_EARTH, R_EARTH, 4 * 86400) };
     }
-    if (this.phase !== 'coast') return null;
-    const mu = this.frame === 'moon' ? MU_MOON : MU_EARTH;
-    const body = this.frame === 'moon' ? R_MOON : R_EARTH;
-    return { frame: this.frame, points: samplePath(this.r, this.v, mu, body) };
+    if (this.phase !== 'coast' || this.arc.hold) return null;
+    const next = this.nextEvent();
+    const untilNext = next ? (next.ms - this.now) / 1000 : null;
+    const body = BODIES[this.frame];
+    const span = this.frame === 'sun' ? (untilNext ?? 2 * 365.25 * 86400) : (untilNext ? untilNext * 1.15 : 4 * 86400);
+    return { frame: this.frame, points: samplePath(this.r, this.v, body.mu, this.frame === 'sun' ? 0 : body.radius, span, this.frame !== 'sun') };
   }
 
   elements() {
-    if (this.phase === 'countdown' || this.phase === 'failed') return null;
-    const mu = this.frame === 'moon' ? MU_MOON : MU_EARTH;
-    const el = stateToElements(this.r, this.v, mu);
-    const body = this.frame === 'moon' ? R_MOON : R_EARTH;
-    return { ...el, body: this.frame === 'moon' ? 'Moon' : 'Earth', periAlt: el.rp - body, apoAlt: el.ra - body };
+    if (this.phase === 'countdown' || this.phase === 'failed' || this.arc?.hold) return null;
+    const body = BODIES[this.phase === 'ascent' ? 'earth' : this.frame];
+    const el = stateToElements(this.r, this.v, body.mu);
+    return { ...el, body: body.name, bodyId: body.id, periAlt: el.rp - body.radius, apoAlt: el.ra - body.radius };
   }
 
   totalDeltaV() {
@@ -361,7 +547,7 @@ export class Mission {
 
   recordTrail(ms) {
     if (this.phase === 'countdown') { this.lastTrailMs = ms; return; }
-    const list = this.trail[this.frame];
+    const list = this.trail[this.frame] || (this.trail[this.frame] = []);
     const earthFrame = this.frame === 'earth';
     const pushPoint = (p, t) => {
       list.push(p);
@@ -378,18 +564,22 @@ export class Mission {
       this.lastTrailMs = ms;
       return;
     }
+    if (this.arc.hold) { this.lastTrailMs = ms; return; }
     // Coast: sample the analytic arc between the previous and current time.
     const from = Math.max(this.lastTrailMs ?? ms, this.arc.ms);
     const span = (ms - from) / 1000;
-    const rNow = norm(this.r);
-    const mu = this.arc.mu;
-    const step = Math.max(2, (2 * Math.PI * Math.sqrt((rNow ** 3) / mu)) / 360);
+    if (span <= 0) return;
+    const s = this.stateAtArc(ms);
+    const rNow = norm(s.r);
+    const vNow = norm(s.v);
+    // About 1/360 of an orbit, or 1/300 of the time to travel the current distance.
+    const step = Math.max(2, Math.min((2 * Math.PI * Math.sqrt(rNow ** 3 / this.arc.mu)) / 360, rNow / Math.max(vNow, 1e-6) / 300));
     const n = Math.min(400, Math.floor(span / step));
     for (let k = 1; k <= n; k++) {
       const t = from + (k * span * 1000) / (n + 1);
       pushPoint(this.stateAtArc(t).r, t);
     }
-    pushPoint([...this.r], ms);
+    pushPoint(s.r, ms);
     this.lastTrailMs = ms;
   }
 }
@@ -399,17 +589,15 @@ export class Mission {
 // Lunar missions launch into the plane that contains the Moon's expected
 // arrival point, as Apollo did by picking the launch azimuth.
 export function lunarPlaneNormal(site, launchMs) {
-  const site0 = geoToEci(site.lat, site.lon, 1, launchMs);
-  const moonDir = moonPositionEci(launchMs + 4.1 * 86400e3);
-  const n = unit(cross(site0, moonDir));
-  return n[2] < 0 ? scale(n, -1) : n;
+  return planeContaining(geoToEci(site.lat, site.lon, 1, launchMs), moonPositionEci(launchMs + 4.1 * 86400e3));
 }
 
-function samplePath(r, v, mu, bodyRadius) {
+// Points along the conic through (r, v): a full revolution for closed orbits
+// (or up to `openSpan` when fullOrbit is false), otherwise `openSpan` seconds.
+function samplePath(r, v, mu, bodyRadius, openSpan, fullOrbit = true) {
   const el = stateToElements(r, v, mu);
   const pts = [];
-  const bound = el.e < 1 && el.ra < 2e6;
-  const span = bound ? el.period : 4 * 86400;
+  const span = el.e < 1 ? (fullOrbit ? el.period : Math.min(el.period, openSpan)) : openSpan;
   const n = 360;
   for (let k = 0; k <= n; k++) {
     const p = propagate(r, v, (k / n) * span, mu).r;
@@ -459,20 +647,58 @@ function findNextNode(arc, fromMs) {
   return fromMs;
 }
 
-// First time within `spanSec` that the arc enters the Moon's sphere of influence.
-function findSoiEntry(arc, fromMs, spanSec) {
-  const d = (ms) => dist(propagate(arc.r, arc.v, (ms - arc.ms) / 1000, arc.mu).r, moonPositionEci(ms)) - MOON_SOI;
-  let t0 = fromMs;
-  for (let t = fromMs + 600000; t <= fromMs + spanSec * 1000; t += 600000) {
-    if (d(t) < 0) {
-      let a = t0, b = t;
-      for (let i = 0; i < 40; i++) {
+// Next time (after fromMs) that the position on a near-circular arc points
+// along `dir`.
+function timeToDirection(arc, fromMs, dir) {
+  let t = fromMs;
+  for (let k = 0; k < 4; k++) {
+    const s = propagate(arc.r, arc.v, (t - arc.ms) / 1000, arc.mu);
+    const h = unit(cross(s.r, s.v));
+    const rh = unit(s.r);
+    let ang = Math.atan2(dot(h, cross(rh, dir)), dot(rh, dir));
+    if (k === 0 && ang < 0) ang += 2 * Math.PI;
+    const n = norm(s.v) / norm(s.r);
+    t += (ang / n) * 1000;
+  }
+  return t;
+}
+
+// First time the arc leaves a sphere of radius `soi` around its centre.
+function findSoiExit(arc, fromMs, soi) {
+  const r = (ms) => norm(propagate(arc.r, arc.v, (ms - arc.ms) / 1000, arc.mu).r);
+  let lo = fromMs, hi = fromMs + 3600e3;
+  while (r(hi) < soi && hi - fromMs < 400 * 86400e3) { lo = hi; hi = fromMs + (hi - fromMs) * 2; }
+  for (let i = 0; i < 50; i++) {
+    const m = (lo + hi) / 2;
+    if (r(m) < soi) lo = m; else hi = m;
+  }
+  return hi;
+}
+
+// First time the arc enters `targetId`'s sphere of influence. The step size
+// adapts to the remaining distance and closing speed, so it neither skips a
+// small sphere nor crawls across a long cruise.
+function findSoiEntry(arc, fromMs, untilMs, targetId) {
+  const soi = BODIES[targetId].soi;
+  const gap = (ms) => {
+    const s = propagate(arc.r, arc.v, (ms - arc.ms) / 1000, arc.mu);
+    const b = stateRelTo(targetId, arc.center, ms);
+    return { d: dist(s.r, b.r) - soi, v: norm(sub(s.v, b.v)) };
+  };
+  let prev = fromMs;
+  let t = fromMs;
+  for (let k = 0; k < 20000 && t <= untilMs; k++) {
+    const { d, v } = gap(t);
+    if (d < 0) {
+      let a = prev, b = t;
+      for (let i = 0; i < 50; i++) {
         const m = (a + b) / 2;
-        if (d(m) < 0) b = m; else a = m;
+        if (gap(m).d < 0) b = m; else a = m;
       }
       return b;
     }
-    t0 = t;
+    prev = t;
+    t += Math.max(1000, Math.min(30 * 86400e3, (0.3 * d / Math.max(v, 0.01)) * 1000));
   }
   return null;
 }

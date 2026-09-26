@@ -2,9 +2,11 @@
 
 import * as THREE from 'three';
 import { AU, DEG, MU_EARTH, OMEGA_EARTH, R_EARTH, R_MOON } from './core/constants.js';
-import { PLANETS, inEarthShadow, moonPositionEci, planetPositionEci, sunPositionEci } from './core/ephemeris.js';
+import { inEarthShadow, moonPositionEci, sunPositionEci } from './core/ephemeris.js';
 import { launchAzimuth } from './core/ascent.js';
-import { Mission, TARGETS, targetInclination } from './core/mission.js';
+import { BODIES, MOON_IDS, PLANET_IDS, helioPosition, positionRelEarth, systemPlanet } from './core/bodies.js';
+import { findTransferWindow } from './core/interplanetary.js';
+import { Mission, TARGETS, isInterplanetary, launchTimeFor, targetInclination } from './core/mission.js';
 import { assessMission, maxPayload } from './core/planner.js';
 import { stateToElements } from './core/orbits.js';
 import { Population, nearestObjects } from './core/population.js';
@@ -19,7 +21,7 @@ import { LabelLayer } from './view/labels.js';
 import { SolarView } from './view/solarView.js';
 
 const $ = (id) => document.getElementById(id);
-const WARPS = [1, 2, 5, 10, 30, 60, 120, 300, 600, 1800, 3600, 10800, 43200, 86400, 604800];
+const WARPS = [1, 2, 5, 10, 30, 60, 120, 300, 600, 1800, 3600, 10800, 43200, 86400, 604800, 2592000, 31557600];
 const ASCENT_MAX_WARP = 50;
 const DEFAULT_DEBRIS = 4000;
 const LIGHT_SPEED = 299792.458; // km/s
@@ -48,9 +50,11 @@ function fmtPeriod(sec) {
 }
 function fmtWarp(w) {
   if (w < 60) return `${w}×`;
-  const per = w >= 86400 ? `${fmt(w / 86400, w % 86400 ? 1 : 0)} d/s` : w >= 3600 ? `${fmt(w / 3600, w % 3600 ? 1 : 0)} h/s` : `${fmt(w / 60)} min/s`;
+  const per = w >= 31557600 ? `${fmt(w / 31557600)} yr/s` : w >= 86400 ? `${fmt(w / 86400, w % 86400 ? 1 : 0)} d/s` : w >= 3600 ? `${fmt(w / 3600, w % 3600 ? 1 : 0)} h/s` : `${fmt(w / 60)} min/s`;
   return `${fmt(w)}× · ${per}`;
 }
+const fmtDate = (ms) => new Date(ms).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' });
+const fmtDuration = (days) => (days >= 548 ? `${fmt(days / 365.25, 1)} years` : days >= 60 ? `${fmt(days / 30.44, 1)} months` : `${fmt(days, 1)} days`);
 const fmtLatLon = (g) => `${fmt(Math.abs(g.lat), 2)}°${g.lat >= 0 ? 'N' : 'S'}, ${fmt(Math.abs(g.lon), 2)}°${g.lon >= 0 ? 'E' : 'W'}`;
 const escapeHtml = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const rows = (pairs) => pairs.map(([k, v]) => `<div><dt>${k}</dt><dd>${v}</dd></div>`).join('');
@@ -146,21 +150,44 @@ function trackCraft() {
 
 // ------------------------------------------------------------------ views
 
+// Views: 'earth' | 'follow' | 'earthmoon' | 'solar' | 'body:<id>' (Moon, planets, moons).
 function setView(view) {
   state.view = view;
   document.querySelectorAll('.views button').forEach((b) => b.classList.toggle('active', b.dataset.view === view));
+  const bodySel = $('view-body');
+  bodySel.classList.toggle('active', view.startsWith('body:'));
+  if (!view.startsWith('body:')) bodySel.value = '';
   earthView.controls.enabled = view !== 'solar';
   solarView.controls.enabled = view === 'solar';
   labels.clear();
   if (view === 'solar') return;
   if (view === 'follow') {
     if (!trackedPosition()) { setView('earth'); return; }
-    earthView.setView('follow', trackedPosition, trackingCraft() ? 1500 : 900);
+    const m = state.mission;
+    // Away from Earth, look "down" on the craft from the side of the body it
+    // orbits, far enough back to see that orbit.
+    const away = trackingCraft() && m.frame !== 'earth' && (m.phase === 'coast' || m.phase === 'failed');
+    const dist = away ? Math.max(1500, Math.min(norm(m.r) * 0.8, 5e7)) : trackingCraft() ? 1500 : 900;
+    earthView.setView('follow', trackedPosition, dist, away ? eciToWorld(m.r) : null);
+  } else if (view.startsWith('body:')) {
+    const id = view.slice(5);
+    bodySel.value = id;
+    if (id === 'moon') { earthView.setView('moon'); return; }
+    const b = BODIES[id];
+    // Look from the sunlit side, slightly above the body's equator.
+    const sunward = eciToWorld(helioPosition(id, state.simMs)).multiplyScalar(-1).normalize();
+    earthView.setView('body', () => positionRelEarth(id, state.simMs), b.radius * 5, sunward.add(new THREE.Vector3(0, 0.45, 0)));
   } else {
     earthView.setView(view);
   }
 }
 document.querySelectorAll('.views button').forEach((b) => b.addEventListener('click', () => setView(b.dataset.view)));
+$('view-body').innerHTML = '<option value="">Planets & moons…</option><option value="moon">Moon</option>'
+  + PLANET_IDS.map((p) => {
+    const moons = BODIES[p].moons.map((m) => `<option value="${m}">&nbsp;&nbsp;${BODIES[m].name}</option>`).join('');
+    return `<option value="${p}">${BODIES[p].name}</option>${moons}`;
+  }).join('');
+$('view-body').addEventListener('change', (e) => { if (e.target.value) setView(`body:${e.target.value}`); });
 
 // ------------------------------------------------------------------ time controls
 
@@ -201,7 +228,11 @@ const siteSel = $('site'), vehSel = $('vehicle'), tgtSel = $('target');
 const payloadIn = $('payload'), altIn = $('altitude'), incIn = $('inclination');
 siteSel.innerHTML = SITES.map((s) => `<option value="${s.id}">${escapeHtml(s.name)}</option>`).join('');
 vehSel.innerHTML = VEHICLES.map((v) => `<option value="${v.id}">${escapeHtml(v.name)} — ${escapeHtml(v.operator)}</option>`).join('');
-tgtSel.innerHTML = Object.entries(TARGETS).map(([id, t]) => `<option value="${id}">${escapeHtml(t.label)}</option>`).join('');
+{
+  const groups = {};
+  for (const [id, t] of Object.entries(TARGETS)) (groups[t.group] ||= []).push(`<option value="${id}">${escapeHtml(t.label)}</option>`);
+  tgtSel.innerHTML = Object.entries(groups).map(([g, opts]) => `<optgroup label="${escapeHtml(g)}">${opts.join('')}</optgroup>`).join('');
+}
 
 const getSite = () => SITES.find((s) => s.id === siteSel.value);
 const getVehicle = () => VEHICLES.find((v) => v.id === vehSel.value);
@@ -215,7 +246,7 @@ function applyTargetDefaults() {
     incIn.disabled = false;
     incIn.value = Math.abs(site.lat).toFixed(1);
     incIn.placeholder = '';
-  } else if (tgtSel.value === 'moon') {
+  } else if (TARGETS[tgtSel.value].body) {
     incIn.disabled = true; incIn.value = ''; incIn.placeholder = 'auto';
   } else {
     incIn.disabled = true;
@@ -231,11 +262,15 @@ function updatePlan() {
   const twr = v.phases[0].thrustSL / (mass * 9.80665);
   $('vehicle-info').innerHTML = `${escapeHtml(v.operator)} · liftoff ${fmt(mass / 1000)} t · thrust/weight ${fmt(twr, 2)} · ideal Δv ${fmt(dv, 2)} km/s · up to ${fmt(v.payloadLEO / 1000, 1)} t to LEO`;
 
-  if (!t.editableInc && tid !== 'moon') incIn.value = targetInclination(tid, +altIn.value, site).toFixed(1);
+  if (!t.editableInc && !t.body) incIn.value = targetInclination(tid, +altIn.value, site).toFixed(1);
   const alt = +altIn.value;
   const lines = [];
   if (tid === 'moon') {
     lines.push('Parking orbit aligned with the Moon’s arrival point, then trans-lunar injection and lunar orbit insertion.');
+  } else if (isInterplanetary(tid)) {
+    const b = BODIES[t.body];
+    const planet = BODIES[systemPlanet(t.body)];
+    lines.push(`Parking orbit aligned with the escape direction, then an escape burn at the launch window, a trajectory correction, and capture at ${planet.name}${b !== planet ? `, followed by a transfer to ${b.name}${b.small ? ' and a rendezvous (it is too small to orbit)' : ' and orbit insertion'}` : ''}.`);
   } else {
     const inc = tid === 'leo' ? +incIn.value : targetInclination(tid, alt, site);
     const az = launchAzimuth(site.lat, inc);
@@ -256,6 +291,21 @@ function updatePlan() {
 
 const DESTINATION = { leo: 'orbit', iss: 'the ISS orbit', sso: 'sun-synchronous orbit', polar: 'polar orbit', geo: 'geostationary orbit', moon: 'the Moon' };
 const DEPARTURE_BURN = { geo: 'GTO injection', moon: 'trans-lunar injection' };
+for (const id of [...PLANET_IDS, ...MOON_IDS]) {
+  DESTINATION[id] = BODIES[id].name;
+  DEPARTURE_BURN[id] = `the escape burn to ${BODIES[systemPlanet(id)].name}`;
+}
+
+// Launch windows are cached per destination and day.
+const windowCache = new Map();
+function launchWindow(targetId = tgtSel.value) {
+  if (!isInterplanetary(targetId)) return null;
+  const dest = TARGETS[targetId].body;
+  const day = Math.floor(state.simMs / 86400e3);
+  const key = `${dest}|${day}`;
+  if (!windowCache.has(key)) windowCache.set(key, findTransferWindow(systemPlanet(dest), day * 86400e3, 200, dest));
+  return windowCache.get(key);
+}
 let planTimer = null;
 let adjustPayload = false; // may lower the payload on the next check
 let payloadIsAuto = false; // the current payload was chosen by the app
@@ -267,6 +317,7 @@ function planOptions(payload, vehicle = getVehicle()) {
     vehicle, site, targetId, altitude, payload,
     inclination: targetInclination(targetId, altitude, site, +incIn.value),
     launchMs: state.simMs + 10000,
+    window: launchWindow(targetId),
   };
 }
 
@@ -317,6 +368,12 @@ function runPlanCheck() {
     html += ` <button type="button" class="small" id="use-max">Use ${fmt(use)} kg</button>`;
     box.className = 'plan-check bad';
   }
+  const w = launchWindow(tid);
+  if (w) {
+    const waitDays = (w.departMs - state.simMs) / 86400e3;
+    html = `<div class="window">Next launch window: <b>${fmtDate(w.departMs)}</b>${waitDays > 2 ? ` (in ${fmtDuration(waitDays)})` : ''} · cruise ${fmtDuration(w.tofDays)} · arrive ${fmtDate(w.arriveMs)} · C3 ${fmt(w.c3, 1)} km²/s²</div>${html}`;
+    if (waitDays > 0.2) note += '<br><span class="muted">Launching jumps the clock ahead to the window.</span>';
+  }
   box.innerHTML = html + note;
   const btn = $('use-max');
   if (btn) {
@@ -365,8 +422,17 @@ $('mission-form').addEventListener('submit', (e) => {
   const site = getSite(), vehicle = getVehicle(), targetId = tgtSel.value;
   const altitude = readAltitude();
   const inclination = targetInclination(targetId, altitude, site, +incIn.value);
+  const win = launchWindow(targetId);
+  if (win) {
+    // Wait for the launch window: jump the clock to just before it.
+    const start = launchTimeFor(win, state.simMs + 10000) - 10000;
+    if (start - state.simMs > 60000) {
+      state.simMs = start;
+      flash(`Jumped ahead to the ${BODIES[systemPlanet(TARGETS[targetId].body)].name} launch window · ${fmtDate(start)}`, 5000);
+    }
+  }
   state.mission = new Mission({
-    vehicle, site, targetId, altitude, inclination,
+    vehicle, site, targetId, altitude, inclination, window: win,
     payload: Math.max(0, +payloadIn.value || 0),
     startMs: state.simMs,
   });
@@ -514,7 +580,8 @@ $('btn-follow-track').onclick = () => setView('follow');
 
 function computeNearest() {
   const p = trackedPosition();
-  if (!p) { state.nearest = []; return; }
+  state.deepSpace = !!p && norm(p) > 3e6; // far beyond every catalogued orbit
+  if (!p || state.deepSpace) { state.nearest = []; return; }
   const self = trackingCraft() ? null : state.selected;
   const list = nearestObjects(p, Object.values(pops), 9).filter((n) => n.obj !== self).slice(0, 8);
   const vSelf = trackedVelocity() || [0, 0, 0];
@@ -586,7 +653,8 @@ function updateTelemetry(m, next) {
   const met = formatDuration((state.simMs - m.launchMs) / 1000);
   const falling = m.phase === 'ascent' && m.ascent.status === 'ballistic';
   const stranded = m.phase === 'coast' && m.incompleteMs != null;
-  const phaseName = falling ? 'Suborbital' : stranded ? 'Stranded' : { countdown: 'Countdown', ascent: 'Powered ascent', coast: m.frame === 'moon' ? 'Lunar space' : 'Coasting', failed: 'Failed' }[m.phase];
+  const where = m.frame === 'earth' ? 'Coasting' : m.frame === 'moon' ? 'Lunar space' : m.frame === 'sun' ? 'Interplanetary cruise' : `At ${BODIES[m.frame].name}`;
+  const phaseName = falling ? 'Suborbital' : stranded ? 'Stranded' : { countdown: 'Countdown', ascent: 'Powered ascent', coast: where, failed: 'Failed' }[m.phase];
   badge.textContent = phaseName;
   badge.className = `badge ${falling ? 'failed' : stranded ? 'warn' : m.phase}`;
   let r = [['Mission time', met]];
@@ -612,24 +680,48 @@ function updateTelemetry(m, next) {
     bar.hidden = false;
     bar.firstElementChild.style.width = `${Math.max(0, Math.min(1, t.propFraction)) * 100}%`;
     bar.title = `Stage propellant remaining: ${fmt(t.propFraction * 100)} %`;
+  } else if (m.phase === 'coast' && m.arc.hold) {
+    const b = BODIES[m.frame];
+    r.push(
+      ['Holding at', b.name],
+      ['Height', `${fmt(norm(m.r) - b.radius, 1)} km above the surface`],
+      ['From Earth', fmtDist(norm(m.positionEci()))],
+      ['Δv used', `${fmt(m.totalDeltaV(), 2)} km/s`],
+    );
+    bar.hidden = true;
+  } else if (m.phase === 'coast' && m.frame === 'sun') {
+    const el = m.elements();
+    const target = BODIES[systemPlanet(m.destination)];
+    r.push(
+      ['Orbiting', 'Sun'],
+      ['From Sun', fmtDist(norm(m.r))],
+      ['Speed', `${fmt(norm(m.v), 2)} km/s`],
+      [`To ${target.name}`, fmtDist(dist(m.positionHelio(), helioPosition(target.id, state.simMs)))],
+      ['From Earth', fmtDist(norm(m.positionEci()))],
+      ['Perihelion', fmtDist(el.rp)],
+      ['Aphelion', Number.isFinite(el.ra) ? fmtDist(el.ra) : 'escape'],
+      ['Δv used', `${fmt(m.totalDeltaV(), 2)} km/s`],
+    );
   } else if (m.phase === 'coast') {
     const el = m.elements();
-    const body = m.frame === 'moon' ? R_MOON : R_EARTH;
+    const body = BODIES[m.frame].radius;
     r.push(
       ['Orbiting', el.body],
-      ['Altitude', `${fmt(norm(m.r) - body, 1)} km`],
+      ['Altitude', fmtDist(norm(m.r) - body)],
       ['Speed', `${fmt(norm(m.v), 3)} km/s`],
-      ['Periapsis', `${fmt(el.periAlt)} km`],
-      ['Apoapsis', Number.isFinite(el.apoAlt) ? `${fmt(el.apoAlt)} km` : 'escape'],
+      ['Periapsis', fmtDist(el.periAlt)],
+      ['Apoapsis', Number.isFinite(el.apoAlt) && el.e < 1 ? fmtDist(el.apoAlt) : 'escape'],
       ['Inclination', `${fmt(el.i / DEG, 2)}°`],
       ['Eccentricity', fmt(el.e, 4)],
       ['Period', fmtPeriod(el.period)],
       ['Δv used', `${fmt(m.totalDeltaV(), 2)} km/s`],
     );
+  }
+  if (m.phase === 'coast') {
     if (next) r.push(['Next event', `${escapeHtml(next.name)} in ${formatDuration((next.ms - state.simMs) / 1000).replace('T+ ', '')}`]);
     else r.push(['Status', escapeHtml(m.status || 'In orbit')]);
     bar.hidden = true;
-  } else {
+  } else if (m.phase === 'failed') {
     r.push(['Status', `<span class="bad">${escapeHtml(m.status)}</span>`]);
     bar.hidden = true;
   }
@@ -651,6 +743,16 @@ function updateEvents(m) {
       ${e.detail ? `<span>${escapeHtml(e.detail)}</span>` : ''}
     </li>`).join('');
   list.scrollTop = list.scrollHeight;
+  // Switch to the solar-system view for the cruise, and back on arrival.
+  for (const e of fresh) {
+    if (e.name === 'Leaving Earth’s sphere of influence' && (state.view === 'follow' || state.view === 'earth')) {
+      setView('solar');
+      solarView.fit(Math.max(1.2, BODIES[systemPlanet(m.destination)].planet.el[0]));
+    }
+    if (e.name.startsWith('Arrival at ') && state.view === 'solar' && m.frame !== 'sun') setView('follow');
+    // Re-frame the camera on the new, much smaller orbit after a capture.
+    if ((e.name.endsWith('orbit insertion') || e.name.startsWith('Rendezvous')) && state.view === 'follow' && trackingCraft() && m.frame !== 'earth') setView('follow');
+  }
   const notable = fresh.filter((e) => e.name !== 'Ignition' && e.name !== 'Countdown');
   if (notable.length) {
     // After insertion, multi-burn missions coast for a while: point at the skip button.
@@ -676,11 +778,12 @@ function updateTracking() {
   $('track-note').textContent = craft ? `${fmt(m.payload)} kg payload from ${m.site.short}` : `${CATEGORIES[obj.cat].label} · ${obj.note}`;
   $('track-swatch').style.background = craft ? '#ffd24d' : CATEGORIES[obj.cat].color;
   const v = trackedVelocity();
-  const nearMoon = craft && m.frame === 'moon';
-  const info = nearMoon
+  const away = craft && m.frame !== 'earth' && (m.phase === 'coast' || m.phase === 'failed');
+  const center = away ? BODIES[m.frame] : null;
+  const info = away
     ? [
-      ['Altitude (Moon)', fmtDist(norm(m.r) - R_MOON)],
-      ['Speed (Moon)', `${fmt(norm(m.v), 3)} km/s`],
+      center.id === 'sun' ? ['From Sun', fmtDist(norm(m.r))] : [`Altitude (${center.name})`, fmtDist(norm(m.r) - center.radius)],
+      [`Speed (${center.name})`, `${fmt(norm(m.v), 3)} km/s`],
       ['From Earth', fmtDist(norm(p))],
     ]
     : [
@@ -707,24 +810,35 @@ function updateBodies() {
   if (!p) { $('bodies').innerHTML = ''; return; }
   const sun = sunPositionEci(t);
   const moon = moonPositionEci(t);
-  const shadow = inEarthShadow(p, sun);
+  const dEarth = norm(p);
   const dMoon = dist(p, moon);
   const dSun = dist(p, sun);
+  const nearEarth = dEarth < 2e6;
+  const m = trackingCraft() ? state.mission : null;
+  const dest = m && m.destination && systemPlanet(m.destination) !== 'earth' ? systemPlanet(m.destination) : null;
   const out = [
-    ['Earth', fmtDist(norm(p) - R_EARTH) + ' up', shadow ? 'in Earth’s shadow' : 'in sunlight'],
+    ['Earth', nearEarth ? `${fmtDist(dEarth - R_EARTH)} up` : fmtDist(dEarth), nearEarth ? (inEarthShadow(p, sun) ? 'in Earth’s shadow' : 'in sunlight') : fmtLight(dEarth)],
     ['Moon', fmtDist(dMoon - R_MOON), `${fmtLight(dMoon)} · centre ${fmtDist(dMoon)}`],
     ['Sun', fmtDist(dSun), fmtLight(dSun)],
   ];
-  for (const pl of PLANETS) {
-    if (pl.name === 'Earth') continue;
-    const d = dist(p, planetPositionEci(pl, t));
-    out.push([pl.name, fmtDist(d), fmtLight(d)]);
+  for (const id of PLANET_IDS) {
+    const d = dist(p, positionRelEarth(id, t));
+    const above = d < BODIES[id].soi ? ` · ${fmtDist(d - BODIES[id].radius)} up` : '';
+    out.push([id === dest ? `<b>${BODIES[id].name}</b>` : BODIES[id].name, fmtDist(d), fmtLight(d) + above]);
+    // Moons of the destination planet, or of any planet we are close to.
+    if (id === dest || d < BODIES[id].soi) {
+      for (const mid of BODIES[id].moons) {
+        const dm = dist(p, positionRelEarth(mid, t));
+        out.push([`&nbsp;&nbsp;↳ ${BODIES[mid].name}`, fmtDist(dm), fmtDist(dm - BODIES[mid].radius) + ' above surface']);
+      }
+    }
   }
   $('bodies').innerHTML = `<thead><tr><th>Body</th><th>Distance</th><th>Detail</th></tr></thead><tbody>${out.map(([a, b, c]) => `<tr><td>${a}</td><td>${b}</td><td>${c}</td></tr>`).join('')}</tbody>`;
 }
 
 function updateNearby() {
   const list = state.nearest;
+  if (state.deepSpace) { $('nearby').innerHTML = '<tbody><tr><td class="muted">Deep space: no catalogued satellites or debris out here.</td></tr></tbody>'; return; }
   if (!list.length) { $('nearby').innerHTML = '<tbody><tr><td class="muted">Select an object or launch a mission.</td></tr></tbody>'; return; }
   $('nearby').innerHTML = `<thead><tr><th>Object</th><th>Distance</th><th>Rel. speed</th></tr></thead><tbody>${list.map((n, i) => `
     <tr class="${n.distance < state.threshold ? 'alert' : ''}" data-i="${i}">
@@ -752,6 +866,15 @@ function earthLabels() {
   if (camDist > 150000) items.push({ key: 'earth', text: 'Earth', world: new THREE.Vector3(0, R_EARTH * 1.5, 0), cls: 'body' });
   if (earthView.options.sites && camDist < 60000) {
     for (const s of SITES) items.push({ key: `site-${s.id}`, text: s.short, world: eciToWorld(geoToEci(s.lat, s.lon, R_EARTH + 10, t)), cls: 'site' });
+  }
+  // Planets (visible as bright points), and their moons when the camera is near.
+  const destId = state.mission?.destination;
+  for (const id of [...PLANET_IDS, ...MOON_IDS]) {
+    const o = earthView.bodyObjs[id];
+    if (!o || !o.dot.visible) continue;
+    const b = BODIES[id];
+    const isDest = id === destId || (destId && BODIES[destId].parent === id);
+    items.push({ key: `body-${id}`, text: id === destId ? `${b.name} · destination` : b.name, world: eciToWorld(positionRelEarth(id, t)).add(new THREE.Vector3(0, b.radius * 1.3, 0)), cls: isDest ? 'body target' : 'body' });
   }
   if (state.selected) items.push({ key: 'sel', text: state.selected.name, world: eciToWorld(state.selected.getPosition()), cls: 'sel' });
   if (state.mission) items.push({ key: 'craft', text: state.mission.vehicle.name, world: eciToWorld(state.mission.positionEci()), cls: 'craft' });
