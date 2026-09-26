@@ -80,8 +80,9 @@ export const VEHICLES = [
     defaultPayload: 1750,
     upperStageCanRestart: true,
     phases: [
-      { name: 'PS1 + 6× PSOM-XL strap-ons', sep: 'Strap-on separation', dry: 15000, prop: 136000, thrustSL: 7600e3, thrustVac: 8400e3, ispSL: 245, ispVac: 268, solid: true },
-      { name: 'PS1 solid core', sep: 'PS1 separation', dry: 30200, prop: 76000, thrustSL: 4800e3, thrustVac: 4800e3, ispSL: 237, ispVac: 269, solid: true },
+      // Average thrust consistent with the burn times (~50 s strap-ons, ~110 s PS1).
+      { name: 'PS1 + 6× PSOM-XL strap-ons', sep: 'Strap-on separation', dry: 15000, prop: 136000, thrustSL: 6400e3, thrustVac: 7090e3, ispSL: 240, ispVac: 266, solid: true },
+      { name: 'PS1 solid core', sep: 'PS1 separation', dry: 30200, prop: 76000, thrustSL: 3050e3, thrustVac: 3460e3, ispSL: 237, ispVac: 269, solid: true },
       { name: 'PS2 (Vikas)', sep: 'PS2 separation', dry: 5300, prop: 42000, thrustSL: 0, thrustVac: 800e3, ispSL: 0, ispVac: 293 },
       { name: 'PS3 solid', sep: 'PS3 separation', dry: 1100, prop: 7600, thrustSL: 0, thrustVac: 240e3, ispSL: 0, ispVac: 295, solid: true },
       { name: 'PS4 (2× liquid engines)', sep: 'PS4 cutoff', dry: 900, prop: 2500, thrustSL: 0, thrustVac: 14.6e3, ispSL: 0, ispVac: 308 },

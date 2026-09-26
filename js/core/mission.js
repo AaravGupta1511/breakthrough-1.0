@@ -10,7 +10,7 @@
 // rendezvous for moons too small to orbit).
 
 import { MU_EARTH, MU_SUN, R_EARTH } from './constants.js';
-import { Ascent, MAX_DIRECT_INSERTION_ALT } from './ascent.js';
+import { Ascent, MAX_DIRECT_INSERTION_ALT, corridorText, lowestInclination } from './ascent.js';
 import { BODIES, ECLIPTIC_NORTH, MOON_IDS, PLANET_IDS, helioPosition, orbitNormal, positionRelEarth, stateRelTo, systemPlanet } from './bodies.js';
 import { moonPositionEci } from './ephemeris.js';
 import { captureOrbit, departurePoint, escapeDeltaV, findTransferWindow, planeContaining } from './interplanetary.js';
@@ -48,13 +48,17 @@ export const isInterplanetary = (targetId) => {
 // Launch time for an interplanetary window: shortly before the escape burn.
 export const launchTimeFor = (window, nowMs) => Math.max(nowMs, window.departMs - DEPARTURE_LEAD);
 
+// Earth-orbit targets must hit their inclination; the GEO, Moon and planet
+// parking orbits can use whatever plane range safety allows.
+export const inclinationIsMandatory = (targetId) => !TARGETS[targetId].parking;
+
 // Resolve the inclination actually requested for a target from a given site.
 export function targetInclination(targetId, altKm, site, customInc) {
   const t = TARGETS[targetId];
   if (t.inc === 'sso') return sunSyncInclination(altKm) * 180 / Math.PI;
   if (typeof t.inc === 'number') return t.inc;
   if (t.editableInc && Number.isFinite(customInc)) return customInc;
-  return Math.abs(site.lat); // due east: the cheapest orbit from this site
+  return lowestInclination(site); // the cheapest orbit range safety allows from this site
 }
 
 export class Mission {
@@ -90,12 +94,21 @@ export class Mission {
     this.ascent = new Ascent({
       vehicle, payload, site, launchMs: this.launchMs,
       targetAlt: altitude, inclination, planeNormal,
+      // Earth-orbit targets need their exact inclination (dogleg if range
+      // safety forbids the direct azimuth); transfers adapt to the plane flown.
+      inclinationMandatory: inclinationIsMandatory(targetId),
     });
     this.inclination = this.ascent.inclination;
     this.ascentEventsSeen = 0;
     this.log(startMs, 'Countdown', `${vehicle.name} from ${site.short}, target: ${TARGETS[targetId].label}`);
     if (this.ascent.inclinationClamped) {
       this.log(startMs, 'Note', `Inclination raised to ${this.inclination.toFixed(1)}°: a site at ${site.lat.toFixed(1)}° latitude cannot launch directly into a lower one.`);
+    }
+    const plan = this.ascent.plan;
+    if (plan.dogleg) {
+      this.log(startMs, 'Range safety', `${site.short} may only launch ${corridorText(site)} (${site.range}). Flying ${plan.launchAz.toFixed(0)}° first, then a dogleg turn towards ${plan.targetAz.toFixed(0)}° during the upper-stage burns to reach ${plan.inclination.toFixed(1)}°.`, 'warn');
+    } else if (plan.adjusted) {
+      this.log(startMs, 'Range safety', `${site.short} may only launch ${corridorText(site)} (${site.range}). Flying ${plan.launchAz.toFixed(0)}° instead of ${plan.wantedAz.toFixed(0)}°, into a ${plan.inclination.toFixed(1)}° orbit.`, 'warn');
     }
     this.now = startMs;
     this.r = geoToEci(site.lat, site.lon, R_EARTH, startMs);
