@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Simulator · Breakthrough</title>
+  <meta name="description" content="Simulate rocket launches, orbits and transfers, and see where your spacecraft is relative to the Earth, Moon, planets, satellites and space debris.">
+  <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="css/base.css">
+  <link rel="stylesheet" href="css/sim.css">
+  <script type="importmap">
+    { "imports": { "three": "./vendor/three/three.module.min.js", "three/addons/": "./vendor/three/addons/" } }
+  </script>
+</head>
+<body class="sim">
+  <header class="topbar">
+    <a class="brand" href="index.html" aria-label="Breakthrough home">
+      <svg viewBox="0 0 32 32" aria-hidden="true"><circle cx="16" cy="16" r="6" fill="currentColor"/><ellipse cx="16" cy="16" rx="14" ry="6" fill="none" stroke="currentColor" stroke-width="1.6" transform="rotate(-25 16 16)"/></svg>
+      <span>Breakthrough</span>
+    </a>
+
+    <nav class="views" aria-label="Camera view">
+      <button data-view="earth" class="active">Earth</button>
+      <button data-view="follow" id="view-follow">Follow</button>
+      <button data-view="moon">Moon</button>
+      <button data-view="earthmoon">Earth–Moon</button>
+      <button data-view="solar">Solar system</button>
+    </nav>
+
+    <div class="search">
+      <input id="search" type="search" placeholder="Find a satellite…" autocomplete="off" aria-label="Search satellites">
+      <ul id="search-results" role="listbox" hidden></ul>
+    </div>
+
+    <div class="clock">
+      <time id="utc">—</time>
+      <div class="time-controls">
+        <button id="btn-now" title="Jump to the current real time">Now</button>
+        <button id="btn-slower" title="Slower (−)" aria-label="Slower">«</button>
+        <button id="btn-play" title="Pause / resume (space)" aria-label="Pause">❚❚</button>
+        <button id="btn-faster" title="Faster (+)" aria-label="Faster">»</button>
+        <span id="warp" class="warp">1×</span>
+        <button id="btn-next" title="Skip to just before the next mission event" disabled>Next event ⏭</button>
+      </div>
+    </div>
+  </header>
+
+  <main class="layout">
+    <aside class="panel left" aria-label="Mission control">
+      <section class="card">
+        <h2>Mission setup</h2>
+        <form id="mission-form" class="form">
+          <label>Launch site
+            <select id="site"></select>
+          </label>
+          <label>Rocket
+            <select id="vehicle"></select>
+          </label>
+          <p class="hint" id="vehicle-info"></p>
+          <label>Payload mass (kg)
+            <input id="payload" type="number" min="0" step="any">
+          </label>
+          <label>Destination
+            <select id="target"></select>
+          </label>
+          <div class="row">
+            <label>Altitude (km)
+              <input id="altitude" type="number" min="150" max="2000" step="any">
+            </label>
+            <label>Inclination (°)
+              <input id="inclination" type="number" min="0" max="180" step="any">
+            </label>
+          </div>
+          <p class="hint" id="plan-info"></p>
+          <div class="actions">
+            <button type="submit" id="btn-launch" class="primary">🚀 Launch</button>
+            <button type="button" id="btn-reset" class="ghost" disabled>Reset</button>
+          </div>
+        </form>
+      </section>
+
+      <section class="card" id="telemetry-card">
+        <h2>Telemetry <span id="phase-badge" class="badge">Standby</span></h2>
+        <dl class="grid-dl" id="telemetry"><div><dt>Status</dt><dd>Configure a mission and press Launch.</dd></div></dl>
+        <div class="progress" id="prop-bar" hidden><span></span></div>
+      </section>
+
+      <section class="card grow">
+        <h2>Flight log</h2>
+        <ol id="events" class="events"><li class="muted">No mission yet.</li></ol>
+      </section>
+    </aside>
+
+    <section class="viewport" id="viewport">
+      <canvas id="scene" aria-label="3D view of Earth orbit"></canvas>
+      <div class="layers" id="layers">
+        <button class="layers-toggle" id="layers-toggle" aria-expanded="true">Layers</button>
+        <div class="layers-body" id="layers-body"></div>
+      </div>
+      <div class="hint-overlay">Drag to rotate · scroll/pinch to zoom · click any object</div>
+      <div class="tooltip" id="tooltip" hidden></div>
+      <div class="banner" id="banner" hidden></div>
+      <div class="boot" id="boot">Loading simulator…</div>
+    </section>
+
+    <aside class="panel right" aria-label="Situational awareness">
+      <section class="card">
+        <h2>Tracking</h2>
+        <div class="track-head">
+          <span class="swatch" id="track-swatch"></span>
+          <div>
+            <div class="track-name" id="track-name">—</div>
+            <div class="track-note" id="track-note"></div>
+          </div>
+          <button class="ghost small" id="btn-follow-track">Follow</button>
+        </div>
+        <dl class="grid-dl" id="track-info"></dl>
+      </section>
+
+      <section class="card">
+        <h2>Relative to celestial bodies</h2>
+        <table class="data" id="bodies"></table>
+      </section>
+
+      <section class="card">
+        <h2>Nearby objects
+          <label class="inline">alert &lt; <input id="threshold" type="number" value="50" min="1" max="100000" step="1"> km</label>
+        </h2>
+        <table class="data" id="nearby"></table>
+      </section>
+
+      <section class="card">
+        <h2>Ground track</h2>
+        <canvas id="map" class="map"></canvas>
+        <p class="legend"><i class="k gold"></i>flown <i class="k cyan dashed"></i>predicted <i class="k orange tri"></i>launch sites <i class="k sun"></i>subsolar point</p>
+      </section>
+    </aside>
+  </main>
+
+  <noscript><div class="fatal">This simulator needs JavaScript.</div></noscript>
+  <div class="fatal" id="fatal" hidden></div>
+  <script>
+    // Browsers block ES modules on file:// URLs; explain how to serve the site.
+    if (location.protocol === 'file:') {
+      var f = document.getElementById('fatal');
+      f.hidden = false;
+      f.innerHTML = '<h2>Please open this site through a local web server</h2><p>Browsers block JavaScript modules on <code>file://</code> pages. From the project folder run:</p><pre>python3 -m http.server 8000</pre><p>then open <a href="http://localhost:8000/simulator.html">http://localhost:8000/simulator.html</a>.</p>';
+    }
+  </script>
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>

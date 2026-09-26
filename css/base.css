@@ -1,0 +1,91 @@
+/* Shared design tokens and resets. The site is dark by design: it is a view
+   into space, and bright panels would wash out the 3D scene. */
+
+:root {
+  --bg: #04060c;
+  --bg-2: #0a0f1c;
+  --panel: rgba(11, 16, 29, 0.94);
+  --panel-solid: #0b101d;
+  --line: #1b2540;
+  --line-2: #26345a;
+  --text: #e7ecf6;
+  --muted: #8d9ab6;
+  --faint: #5d6a88;
+  --accent: #5ce1e6;
+  --accent-ink: #032c30;
+  --gold: #ffd24d;
+  --orange: #ffa24d;
+  --good: #6be39b;
+  --warn: #ffc94d;
+  --bad: #ff6a5a;
+  --radius: 12px;
+  --radius-sm: 8px;
+  --font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+  color-scheme: dark;
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html, body { margin: 0; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.5 var(--font);
+  -webkit-font-smoothing: antialiased;
+}
+
+a { color: var(--accent); }
+a:hover { color: #9af0f3; }
+
+button, input, select { font: inherit; color: inherit; }
+
+button {
+  cursor: pointer;
+  border: 1px solid var(--line-2);
+  background: var(--bg-2);
+  border-radius: var(--radius-sm);
+  padding: 6px 12px;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+button:hover:not(:disabled) { border-color: var(--accent); }
+button:disabled { opacity: 0.45; cursor: not-allowed; }
+button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-ink);
+  font-weight: 650;
+}
+button.primary:hover:not(:disabled) { background: #8cedf0; }
+button.ghost { background: transparent; }
+button.small { padding: 3px 10px; font-size: 13px; }
+
+code, pre { font-family: var(--mono); }
+
+.muted { color: var(--muted); }
+
+.fatal {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: grid;
+  place-content: center;
+  gap: 8px;
+  padding: 24px;
+  background: rgba(4, 6, 12, 0.96);
+  text-align: center;
+}
+.fatal[hidden] { display: none; }
+.fatal pre {
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 10px 16px;
+  justify-self: center;
+}

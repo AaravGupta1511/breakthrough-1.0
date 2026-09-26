@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Breakthrough · Space launch &amp; orbit simulator</title>
+  <meta name="description" content="Simulate rocket launches from real launch sites, follow transfer orbits to GEO and the Moon, and see where you are relative to the planets, satellites and space debris.">
+  <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="css/base.css">
+  <link rel="stylesheet" href="css/site.css">
+</head>
+<body>
+  <header class="site-nav">
+    <a class="brand" href="index.html">
+      <svg viewBox="0 0 32 32" aria-hidden="true"><circle cx="16" cy="16" r="6" fill="currentColor"/><ellipse cx="16" cy="16" rx="14" ry="6" fill="none" stroke="currentColor" stroke-width="1.6" transform="rotate(-25 16 16)"/></svg>
+      <span>Breakthrough</span>
+    </a>
+    <nav>
+      <a href="#features">Features</a>
+      <a href="#missions">Missions</a>
+      <a href="#how">How it works</a>
+      <a href="#accuracy">Accuracy</a>
+      <a class="button primary" href="simulator.html">Open simulator</a>
+    </nav>
+  </header>
+
+  <main>
+    <section class="hero">
+      <canvas id="hero-canvas" aria-hidden="true"></canvas>
+      <div class="hero-copy">
+        <p class="eyebrow">Space launch &amp; orbit simulator</p>
+        <h1>Launch rockets. Trace orbits. Dodge the debris.</h1>
+        <p class="lede">Fly real rockets from real launch sites, watch the ascent stage by stage, then follow your spacecraft to orbit, to geostationary altitude or all the way to the Moon, surrounded by the satellites and debris that share the sky.</p>
+        <div class="cta">
+          <a class="button primary big" href="simulator.html">🚀 Open the simulator</a>
+          <a class="button ghost big" href="#how">How it works</a>
+        </div>
+        <ul class="stats">
+          <li><b>6</b> rockets</li>
+          <li><b>8</b> launch sites</li>
+          <li><b>1,100+</b> satellites</li>
+          <li><b>20,000</b> debris objects max</li>
+          <li><b>8</b> planets + Moon</li>
+        </ul>
+      </div>
+    </section>
+
+    <section id="features" class="section">
+      <h2>What you can do</h2>
+      <div class="cards">
+        <article class="card">
+          <div class="icon">🚀</div>
+          <h3>Simulate launches</h3>
+          <p>Thrust, drag, mass flow and staging are integrated step by step. Watch Max-Q, stage separation, fairing jettison and engine cutoff, or overload the rocket and watch it fall short.</p>
+        </article>
+        <article class="card">
+          <div class="icon">🛰️</div>
+          <h3>Follow travel paths</h3>
+          <p>See the flown trail and the predicted orbit, then fly Hohmann transfers to GEO and Lambert-targeted trans-lunar injections with patched-conic arrival at the Moon.</p>
+        </article>
+        <article class="card">
+          <div class="icon">🌍</div>
+          <h3>Know where you are</h3>
+          <p>Live altitude, latitude/longitude, sunlight or eclipse, and distances to the Moon, Sun and every planet, plus a ground-track map with the day/night terminator.</p>
+        </article>
+        <article class="card">
+          <div class="icon">☄️</div>
+          <h3>Share the sky</h3>
+          <p>Stations, GNSS constellations, weather and comms satellites, Starlink and OneWeb shells, and a debris field with the Fengyun-1C and Iridium–Cosmos clouds. Get alerted on close approaches.</p>
+        </article>
+      </div>
+    </section>
+
+    <section id="missions" class="section">
+      <h2>Try a mission</h2>
+      <p class="section-lede">Each link opens the simulator with the mission set up. Press <b>Launch</b>, then use <b>Next event ⏭</b> to skip long coasts.</p>
+      <div class="missions">
+        <a class="mission" href="simulator.html?vehicle=saturnv&amp;site=ksc&amp;target=moon&amp;payload=45000">
+          <b>Apollo-style Moon shot</b><span>Saturn V · Kennedy · TLI + lunar orbit</span>
+        </a>
+        <a class="mission" href="simulator.html?vehicle=lvm3&amp;site=shar&amp;target=moon&amp;payload=3000">
+          <b>Lunar mission from India</b><span>LVM3 · Sriharikota · 3,000 kg to the Moon</span>
+        </a>
+        <a class="mission" href="simulator.html?vehicle=falcon9&amp;site=ksc&amp;target=geo&amp;payload=5500">
+          <b>Geostationary satellite</b><span>Falcon 9 · Kennedy · GTO → GEO</span>
+        </a>
+        <a class="mission" href="simulator.html?vehicle=pslv&amp;site=shar&amp;target=sso&amp;payload=1750">
+          <b>Earth-imaging satellite</b><span>PSLV-XL · Sriharikota · 600 km sun-synchronous</span>
+        </a>
+        <a class="mission" href="simulator.html?vehicle=soyuz&amp;site=baikonur&amp;target=iss&amp;payload=7100">
+          <b>Crew to the ISS orbit</b><span>Soyuz-2.1b · Baikonur · 51.6°</span>
+        </a>
+        <a class="mission warn" href="simulator.html?vehicle=electron&amp;site=mahia&amp;target=leo&amp;payload=900">
+          <b>Too heavy!</b><span>Electron with 3× its rated payload</span>
+        </a>
+      </div>
+    </section>
+
+    <section id="how" class="section">
+      <h2>How it works</h2>
+      <ol class="steps">
+        <li>
+          <h3>Powered ascent</h3>
+          <p>The rocket flies in the plane that gives your chosen inclination, starting with the eastward push of Earth’s rotation. Each 0.1 s step integrates gravity, thrust (varying with air pressure), drag in an exponential atmosphere and propellant use, following the rocket equation <code>Δv = Isp·g₀·ln(m₀/m₁)</code>. Guidance rises vertically, pitches over into a gravity turn, then steers closed-loop to orbit.</p>
+        </li>
+        <li>
+          <h3>Coasting and burns</h3>
+          <p>Once the engines stop, the spacecraft follows an exact two-body conic (universal-variable Kepler propagation), so time warp never adds error. Manoeuvres are impulsive burns: circularisation at apogee, GTO injection at an equator crossing, a Lambert-solved trans-lunar injection, and capture into lunar orbit after entering the Moon’s sphere of influence.</p>
+        </li>
+        <li>
+          <h3>The neighbourhood</h3>
+          <p>Satellites and debris move on Keplerian orbits with J2 nodal drift, which is why sun-synchronous orbits really stay aligned with the Sun. The Sun, Moon and planets come from standard low-precision ephemerides, which drive the lighting, the day/night terminator, eclipses and every distance read-out.</p>
+        </li>
+      </ol>
+    </section>
+
+    <section id="accuracy" class="section">
+      <h2>Accuracy &amp; data</h2>
+      <div class="notes">
+        <p><b>Educational, not operational.</b> Rocket figures are approximations of published values, and the ascent uses simplified aerodynamics and guidance. Burns after orbit insertion are instantaneous.</p>
+        <p><b>Satellites</b> use representative orbits: correct altitudes, inclinations and shapes, and real longitudes for geostationary spacecraft, but not live tracking data, so positions along each orbit are illustrative.</p>
+        <p><b>Debris</b> is generated to match the real population’s altitude and inclination structure. The count is adjustable; tens of thousands of objects are tracked in reality.</p>
+        <p><b>Ephemerides</b> for the Sun, Moon and planets are accurate to a fraction of a degree between 1800 and 2050. Coastlines are from Natural Earth (public domain). 3D rendering uses <a href="https://threejs.org">three.js</a>.</p>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <span>Breakthrough 1.0 · space launch &amp; orbit simulator</span>
+    <a href="simulator.html">Open simulator →</a>
+  </footer>
+
+  <script src="js/hero.js" defer></script>
+</body>
+</html>
