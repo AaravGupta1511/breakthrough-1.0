@@ -84,8 +84,8 @@
         <a class="mission" href="simulator.html?vehicle=falcon9&amp;site=ksc&amp;target=geo&amp;payload=5500">
           <b>Geostationary satellite</b><span>Falcon 9 · Kennedy · GTO → GEO</span>
         </a>
-        <a class="mission" href="simulator.html?vehicle=pslv&amp;site=shar&amp;target=sso&amp;payload=1750">
-          <b>Earth-imaging satellite</b><span>PSLV-XL · Sriharikota · 600 km sun-synchronous</span>
+        <a class="mission" href="simulator.html?vehicle=pslv&amp;site=shar&amp;target=sso">
+          <b>Earth-imaging satellite</b><span>PSLV-XL · Sriharikota · dogleg around Sri Lanka into sun-synchronous orbit</span>
         </a>
         <a class="mission" href="simulator.html?vehicle=soyuz&amp;site=baikonur&amp;target=iss&amp;payload=7100">
           <b>Crew to the ISS orbit</b><span>Soyuz-2.1b · Baikonur · 51.6°</span>
@@ -113,7 +113,7 @@
       <ol class="steps">
         <li>
           <h3>Powered ascent</h3>
-          <p>The rocket flies in the plane that gives your chosen inclination, starting with the eastward push of Earth’s rotation. Each 0.1 s step integrates gravity, thrust (varying with air pressure), drag in an exponential atmosphere and propellant use, following the rocket equation <code>Δv = Isp·g₀·ln(m₀/m₁)</code>. Guidance rises vertically, pitches over into a gravity turn, then steers closed-loop to orbit.</p>
+          <p>The rocket is flown in 3D within its launch site’s range-safety corridor. Sriharikota, for example, may only launch south-east over the Bay of Bengal, so sun-synchronous flights make PSLV’s real dogleg turn south to pass east of Sri Lanka. Each 0.1 s step integrates gravity, thrust (varying with air pressure), drag in an exponential atmosphere and propellant use, following the rocket equation <code>Δv = Isp·g₀·ln(m₀/m₁)</code>. Guidance rises vertically, pitches over into a gravity turn, then steers closed-loop to orbit.</p>
         </li>
         <li>
           <h3>Coasting and burns</h3>

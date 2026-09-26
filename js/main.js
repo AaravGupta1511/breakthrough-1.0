@@ -3,10 +3,10 @@
 import * as THREE from 'three';
 import { AU, DEG, MU_EARTH, OMEGA_EARTH, R_EARTH, R_MOON } from './core/constants.js';
 import { inEarthShadow, moonPositionEci, sunPositionEci } from './core/ephemeris.js';
-import { launchAzimuth } from './core/ascent.js';
+import { corridorText, lowestInclination, planLaunch } from './core/ascent.js';
 import { BODIES, MOON_IDS, PLANET_IDS, helioPosition, positionRelEarth, systemPlanet } from './core/bodies.js';
 import { findTransferWindow } from './core/interplanetary.js';
-import { Mission, TARGETS, isInterplanetary, launchTimeFor, targetInclination } from './core/mission.js';
+import { Mission, TARGETS, inclinationIsMandatory, isInterplanetary, launchTimeFor, targetInclination } from './core/mission.js';
 import { assessMission, maxPayload } from './core/planner.js';
 import { stateToElements } from './core/orbits.js';
 import { Population, nearestObjects } from './core/population.js';
@@ -244,7 +244,7 @@ function applyTargetDefaults() {
   altIn.disabled = !t.editableAlt;
   if (t.editableInc) {
     incIn.disabled = false;
-    incIn.value = Math.abs(site.lat).toFixed(1);
+    incIn.value = lowestInclination(site).toFixed(1);
     incIn.placeholder = '';
   } else if (TARGETS[tgtSel.value].body) {
     incIn.disabled = true; incIn.value = ''; incIn.placeholder = 'auto';
@@ -273,12 +273,21 @@ function updatePlan() {
     lines.push(`Parking orbit aligned with the escape direction, then an escape burn at the launch window, a trajectory correction, and capture at ${planet.name}${b !== planet ? `, followed by a transfer to ${b.name}${b.small ? ' and a rendezvous (it is too small to orbit)' : ' and orbit insertion'}` : ''}.`);
   } else {
     const inc = tid === 'leo' ? +incIn.value : targetInclination(tid, alt, site);
-    const az = launchAzimuth(site.lat, inc);
-    const vRot = OMEGA_EARTH * R_EARTH * Math.cos(site.lat * DEG) * Math.sin(az.azimuth);
+    const plan = planLaunch(site, inc, { mandatory: inclinationIsMandatory(tid), launchMs: state.simMs });
+    state.launchPlan = plan;
+    const vRot = OMEGA_EARTH * R_EARTH * Math.cos(site.lat * DEG) * Math.sin(plan.targetAz * DEG);
     const need = Math.sqrt(MU_EARTH / (R_EARTH + alt)) + 1.6 - vRot;
-    lines.push(`Launch azimuth ${fmt(az.azimuth / DEG, 1)}° · Earth’s spin ${vRot >= 0 ? 'adds' : 'costs'} ${fmt(Math.abs(vRot) * 1000)} m/s · ≈ ${fmt(need, 1)} km/s to orbit incl. losses`);
-    if (az.clamped) lines.push(`<span class="warn">Lowest inclination reachable from ${escapeHtml(site.short)} is ${fmt(Math.abs(site.lat), 1)}°.</span>`);
+    lines.push(`Launch azimuth ${fmt(plan.launchAz, 0)}° · Earth’s spin ${vRot >= 0 ? 'adds' : 'costs'} ${fmt(Math.abs(vRot) * 1000)} m/s · ≈ ${fmt(need, 1)} km/s to orbit incl. losses`);
+    if (plan.dogleg) {
+      lines.push(`<span class="warn">Range safety: ${escapeHtml(site.short)} may only launch ${corridorText(site)} (${escapeHtml(site.range)}). The ${fmt(plan.inclination, 1)}° orbit needs a heading of ${fmt(plan.targetAz, 0)}°, so the rocket flies ${fmt(plan.launchAz, 0)}° first and makes a <b>dogleg</b> turn during the upper-stage burns, which costs payload.</span>`);
+    } else if (plan.adjusted) {
+      lines.push(`<span class="warn">Range safety: ${escapeHtml(site.short)} may only launch ${corridorText(site)} (${escapeHtml(site.range)}), so this orbit will be inclined ${fmt(plan.inclination, 1)}°.</span>`);
+    } else if (lowestInclination(site) > Math.abs(site.lat) + 0.5 && Math.abs(plan.inclination - lowestInclination(site)) < 0.1) {
+      lines.push(`Range safety: ${escapeHtml(site.short)} may only launch ${corridorText(site)} (${escapeHtml(site.range)}), so the lowest inclination from here is ${fmt(plan.inclination, 1)}° rather than ${fmt(Math.abs(site.lat), 1)}°.`);
+    }
+    if (plan.clamped) lines.push(`<span class="warn">Lowest inclination reachable from ${escapeHtml(site.short)} is ${fmt(Math.abs(site.lat), 1)}°.</span>`);
   }
+  if (tid === 'moon' || isInterplanetary(tid)) state.launchPlan = null;
   if (tid === 'geo') lines.push('Then GTO injection (~2.4 km/s) at an equator crossing and a GEO apogee burn by the satellite.');
   if (payload > v.payloadLEO) lines.push(`<span class="warn">Payload exceeds this rocket’s ${fmt(v.payloadLEO)} kg LEO capacity — expect a failure.</span>`);
   if (twr < 1) lines.push('<span class="warn">Thrust-to-weight below 1: the rocket cannot leave the pad.</span>');
@@ -397,7 +406,7 @@ tgtSel.onchange = () => {
 };
 siteSel.onchange = () => {
   const site = getSite();
-  if (TARGETS[tgtSel.value].editableInc && +incIn.value < Math.abs(site.lat)) incIn.value = Math.abs(site.lat).toFixed(1);
+  if (TARGETS[tgtSel.value].editableInc) incIn.value = lowestInclination(site).toFixed(1);
   updatePlan();
   schedulePlanCheck(payloadIsAuto);
 };
@@ -636,7 +645,7 @@ function updateUi(force = false) {
   const now = performance.now();
   if (force || now - lastMap > 500) {
     lastMap = now;
-    groundMap.draw({ ms: state.simMs, mission: m, selected: trackingCraft() ? null : state.selected, sites: SITES });
+    groundMap.draw({ ms: state.simMs, mission: m, selected: trackingCraft() ? null : state.selected, sites: SITES, site: getSite(), plan: m ? null : state.launchPlan });
   }
   if (state.bannerUntil && now > state.bannerUntil) { $('banner').hidden = true; state.bannerUntil = 0; }
 }
@@ -673,6 +682,8 @@ function updateTelemetry(m, next) {
       ['Dynamic pressure', `${fmt(t.q, 1)} kPa`],
       ['Throttle', `${fmt(t.throttle * 100)} %`],
       ['Pitch', `${fmt(t.pitch, 1)}°`],
+      ['Heading', `${fmt(t.heading, 0)}°${t.dogleg === 'turning' ? ' · dogleg turn' : ''}`],
+      ['Inclination', `${fmt(t.inclination, 1)}°`],
       ['Mass', `${fmt(t.mass / 1000, 1)} t`],
       ['Apoapsis', t.apoapsisAlt > 0 ? `${fmt(t.apoapsisAlt)} km` : '—'],
       ['Periapsis', t.periapsisAlt > -R_EARTH ? `${fmt(t.periapsisAlt)} km` : '—'],

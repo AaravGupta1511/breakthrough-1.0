@@ -4,7 +4,7 @@
 import { MU_EARTH, R_EARTH } from './constants.js';
 import { Ascent } from './ascent.js';
 import { planeContaining } from './interplanetary.js';
-import { R_GEO, launchTimeFor, lunarPlaneNormal } from './mission.js';
+import { R_GEO, inclinationIsMandatory, launchTimeFor, lunarPlaneNormal } from './mission.js';
 import { geoToEci } from './time.js';
 
 const MOON_DISTANCE = 384400; // km
@@ -31,7 +31,7 @@ export function assessMission({ vehicle, payload, site, targetId, altitude, incl
     launchMs = launchTimeFor(window, launchMs);
     planeNormal = planeContaining(geoToEci(site.lat, site.lon, 1, launchMs), window.vInfDep);
   }
-  const a = new Ascent({ vehicle, payload, site, launchMs, targetAlt: altitude, inclination, planeNormal, stepSize: PLAN_STEP });
+  const a = new Ascent({ vehicle, payload, site, launchMs, targetAlt: altitude, inclination, planeNormal, inclinationMandatory: inclinationIsMandatory(targetId), stepSize: PLAN_STEP });
   a.advanceTo(3600);
   const reachesOrbit = a.reachedTarget === true;
   const dvLeft = reachesOrbit ? a.remainingDeltaV() : 0;

@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { AU, DEG, MU_EARTH } from '../js/core/constants.js';
 import { moonPositionEci, planetPositionHelio, PLANETS, sunPositionEci } from '../js/core/ephemeris.js';
 import { solveLambert } from '../js/core/lambert.js';
-import { Ascent } from '../js/core/ascent.js';
+import { Ascent, lowestInclination, planLaunch } from '../js/core/ascent.js';
 import { assessMission, maxPayload } from '../js/core/planner.js';
 import { Mission, R_GEO, TARGETS, launchTimeFor } from '../js/core/mission.js';
 import { BODIES, systemPlanet } from '../js/core/bodies.js';
@@ -101,11 +101,42 @@ function flyMission(opts, days) {
 test('sun-synchronous mission circularises at the target altitude', () => {
   const v = vehicle('pslv');
   const inc = sunSyncInclination(600) / DEG;
-  const m = flyMission({ vehicle: v, payload: 1750, site: site('shar'), targetId: 'sso', altitude: 600, inclination: inc }, 0.2);
+  const m = flyMission({ vehicle: v, payload: 1000, site: site('shar'), targetId: 'sso', altitude: 600, inclination: inc }, 0.2);
   const el = m.elements();
   close(el.periAlt, 600, 15, 'perigee');
   close(el.apoAlt, 600, 15, 'apogee');
-  close(el.i / DEG, inc, 0.2, 'inclination');
+  close(el.i / DEG, inc, 0.3, 'inclination');
+});
+
+test('range safety: launch corridors and when a dogleg is needed', () => {
+  const sso = sunSyncInclination(600) / DEG;
+  const shar = planLaunch(site('shar'), sso, { mandatory: true });
+  assert.equal(shar.dogleg, true, 'Sriharikota SSO needs a dogleg');
+  close(shar.launchAz, 140, 0.01, 'launch azimuth (edge of the Bay of Bengal corridor)');
+  close(shar.targetAz, 188, 1, 'heading of the SSO plane');
+  const vafb = planLaunch(site('vafb'), sso, { mandatory: true });
+  assert.equal(vafb.dogleg, false, 'Vandenberg launches SSO directly south');
+  const iss = planLaunch(site('baikonur'), 51.64, { mandatory: true });
+  assert.equal(iss.dogleg, false, 'Baikonur reaches the ISS orbit directly');
+  const gto = planLaunch(site('shar'), 13.72, { mandatory: false });
+  assert.equal(gto.adjusted, true, 'Sriharikota cannot launch due east');
+  close(gto.inclination, lowestInclination(site('shar')), 0.3, 'GTO parking inclination');
+});
+
+test('PSLV flies the Sriharikota dogleg around Sri Lanka into sun-synchronous orbit', () => {
+  const inc = sunSyncInclination(600) / DEG;
+  const launchMs = T0;
+  const a = new Ascent({ vehicle: vehicle('pslv'), payload: 1000, site: site('shar'), launchMs, targetAlt: 600, inclination: inc });
+  let westmost = 180;
+  for (let t = 5; a.status === 'ascent' && t < 2000; t += 5) {
+    a.advanceTo(t);
+    const g = eciToGeo(a.stateEci().r, launchMs + a.t * 1000);
+    if (g.lat > 5.8 && g.lat < 10) westmost = Math.min(westmost, g.lon); // Sri Lanka's latitudes
+  }
+  assert.ok(a.reachedTarget, a.message);
+  assert.ok(a.events.some((e) => e.name === 'Dogleg manoeuvre'), 'dogleg flown');
+  assert.ok(westmost > 81.9, `ground track passes east of Sri Lanka (westmost ${westmost.toFixed(2)}°E)`);
+  close(a.orbit().inclination, inc, 0.5, 'inclination after the dogleg');
 });
 
 test('GEO mission ends on station with ~2.4 + ~1.8 km/s of transfer burns', () => {
